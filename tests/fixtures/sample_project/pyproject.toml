@@ -1,0 +1,11 @@
+[project]
+name = "sample-project"
+version = "0.1.0"
+description = "Fixture: a project whose resolved tree contains known-vulnerable packages."
+requires-python = ">=3.12"
+dependencies = [
+    "PyYAML==5.3.1",
+    "urllib3==1.26.5",
+    "Jinja2==2.11.3",
+    "requests==2.25.1",
+]
