@@ -34,9 +34,10 @@ def test_version_flag() -> None:
     assert __version__ in result.output
 
 
-def test_scan_runs_on_a_directory(tmp_path: Path) -> None:
+def test_scan_on_a_directory_without_a_lockfile_explains_itself(tmp_path: Path) -> None:
     result = runner.invoke(app, ["scan", str(tmp_path)])
-    assert result.exit_code == 0
+    assert result.exit_code == 2
+    assert "uv lock" in result.output
 
 
 def test_scan_rejects_a_missing_path() -> None:
@@ -46,8 +47,30 @@ def test_scan_rejects_a_missing_path() -> None:
 
 def test_scan_declares_the_full_flag_surface() -> None:
     options = declared_options("scan")
-    for flag in ("--format", "--offline", "--only-reachable", "--min-severity", "--fail-on"):
+    for flag in (
+        "--format",
+        "--offline",
+        "--only-reachable",
+        "--min-severity",
+        "--fail-on",
+        "--python",
+    ):
         assert flag in options
+
+
+def test_min_severity_accepts_four_levels_and_not_unknown() -> None:
+    """``unknown`` is a severity a finding can have, not a floor you can ask for."""
+    group = typer.main.get_command(app)
+    assert isinstance(group, TyperGroup)
+    (param,) = [p for p in group.commands["scan"].params if "--min-severity" in p.opts]
+    choices = getattr(param.type, "choices", None)
+    assert choices is not None
+    assert set(choices) == {"low", "medium", "high", "critical"}
+
+
+def test_sarif_is_declared_but_reports_that_it_is_unimplemented(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["scan", str(tmp_path), "--format", "sarif"])
+    assert result.exit_code == 2
 
 
 def test_scan_help_renders() -> None:

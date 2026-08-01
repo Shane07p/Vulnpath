@@ -10,8 +10,12 @@ from typing import Annotated
 
 import typer
 
-from vulnpath import __version__
+from vulnpath import __version__, render
 from vulnpath.console import console
+from vulnpath.environment import EnvironmentError_
+from vulnpath.lockfile import LockfileError
+from vulnpath.models import Severity
+from vulnpath.scan import environment_drift, run_scan
 
 
 class OutputFormat(StrEnum):
@@ -22,8 +26,13 @@ class OutputFormat(StrEnum):
     SARIF = "sarif"
 
 
-class Severity(StrEnum):
-    """Advisory severity floor."""
+class SeverityFloor(StrEnum):
+    """Accepted values for ``--min-severity``.
+
+    Four values, not five: ``unknown`` is a severity a *finding* can have, but asking
+    for "unknown and above" is meaningless. Findings with unknown severity bypass this
+    filter entirely rather than being hidden by it — see ``scan.passes_severity_floor``.
+    """
 
     LOW = "low"
     MEDIUM = "medium"
@@ -79,14 +88,45 @@ def scan(
         bool, typer.Option("--only-reachable", help="Hide NOT_REACHABLE findings.")
     ] = False,
     min_severity: Annotated[
-        Severity, typer.Option("--min-severity", help="Drop findings below this severity.")
-    ] = Severity.LOW,
+        SeverityFloor | None,
+        typer.Option("--min-severity", help="Drop findings below this severity."),
+    ] = None,
     fail_on: Annotated[
         FailOn, typer.Option("--fail-on", help="Exit non-zero on findings of this class.")
     ] = FailOn.NEVER,
+    python: Annotated[
+        Path | None,
+        typer.Option("--python", help="Virtualenv of the project being scanned."),
+    ] = None,
 ) -> None:
     """Scan a project for reachable vulnerabilities."""
-    console.print("[yellow]scan: not implemented yet (phase 0 skeleton)[/yellow]")
+    if output_format is OutputFormat.SARIF:
+        render.error("SARIF output is not implemented yet.")
+        raise typer.Exit(2)
+    if only_reachable:
+        render.warn("--only-reachable has no effect yet; reachability analysis is not built.")
+
+    floor = Severity(min_severity.value) if min_severity is not None else None
+
+    try:
+        result = run_scan(path, offline=offline, severity_floor=floor)
+    except (LockfileError, EnvironmentError_) as exc:
+        render.error(str(exc))
+        raise typer.Exit(2) from exc
+
+    if output_format is OutputFormat.JSON:
+        render.render_json(result)
+    else:
+        render.render_table(result)
+        for message in environment_drift(path, python):
+            render.warn(message)
+        if offline and result.offline:
+            render.warn("Offline: only cached advisories were consulted.")
+
+    if fail_on is FailOn.ANY and result.findings:
+        raise typer.Exit(1)
+    if fail_on is FailOn.REACHABLE:
+        render.warn("--fail-on reachable cannot gate yet; reachability analysis is not built.")
 
 
 @app.command()
