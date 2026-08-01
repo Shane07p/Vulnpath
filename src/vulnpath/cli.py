@@ -109,7 +109,8 @@ def scan(
     floor = Severity(min_severity.value) if min_severity is not None else None
 
     try:
-        result = run_scan(path, offline=offline, severity_floor=floor)
+        with render.working("Resolving lockfile and querying OSV..."):
+            result = run_scan(path, offline=offline, severity_floor=floor)
     except (LockfileError, EnvironmentError_) as exc:
         render.error(str(exc))
         raise typer.Exit(2) from exc
