@@ -8,7 +8,14 @@ import json
 
 from vulnpath.console import console
 from vulnpath.models import Advisory, Finding, Package, ScanResult, Severity
-from vulnpath.render import group_by_package, render_json, render_table, totals_line
+from vulnpath.render import (
+    SCAN_OPTIONS,
+    group_by_package,
+    render_guide,
+    render_json,
+    render_table,
+    totals_line,
+)
 
 
 def _finding(package: str, advisory_id: str, severity: Severity, depth: int = 1) -> Finding:
@@ -118,3 +125,39 @@ def test_transitive_depth_is_shown() -> None:
     with console.capture() as capture:
         render_table(_result(_finding("markupsafe", "CVE-1", Severity.LOW, depth=3)))
     assert "depth 3" in capture.get()
+
+
+# --- guide ------------------------------------------------------------------------
+
+
+def test_guide_lists_every_command() -> None:
+    with console.capture() as capture:
+        render_guide()
+    output = capture.get()
+    for command in ("scan", "explain", "guide"):
+        assert command in output
+
+
+def test_guide_marks_unimplemented_features_rather_than_hiding_them() -> None:
+    """A guide that lists a dead flag beside a working one is worse than no guide."""
+    with console.capture() as capture:
+        render_guide()
+    output = capture.get()
+    assert "phase 4" in output
+    assert "phase 7" in output
+
+
+def test_every_declared_scan_option_appears_in_the_guide() -> None:
+    """Catches a flag being added to the CLI and never documented."""
+    import typer.main
+    from typer.core import TyperGroup
+
+    from vulnpath.cli import app
+
+    group = typer.main.get_command(app)
+    assert isinstance(group, TyperGroup)
+    declared = {
+        opt for param in group.commands["scan"].params for opt in param.opts if opt.startswith("--")
+    }
+    documented = {name.split()[0] for name, _, _ in SCAN_OPTIONS}
+    assert declared - documented == set()

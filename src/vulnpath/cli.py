@@ -131,6 +131,12 @@ def scan(
 
 
 @app.command()
+def guide() -> None:
+    """List every command and option, what each is for, and what is built yet."""
+    render.render_guide()
+
+
+@app.command()
 def explain(
     advisory_id: Annotated[str, typer.Argument(help="Advisory ID, e.g. CVE-2020-14343.")],
 ) -> None:

@@ -206,6 +206,134 @@ def render_json(result: ScanResult) -> None:
     console.print(result.model_dump_json(indent=2), soft_wrap=True, markup=False)
 
 
+# --- guide ------------------------------------------------------------------------
+# Most of this tool is not built yet. A guide that quietly lists unimplemented flags
+# alongside working ones would be worse than no guide, so every entry carries status.
+
+READY = "ready"
+
+COMMANDS: list[tuple[str, str, str]] = [
+    ("scan [PATH]", READY, "Resolve the lockfile, match advisories, print findings."),
+    ("explain <ID>", "phase 4", "Everything known about one advisory: path, fix, evidence."),
+    ("guide", READY, "This page."),
+]
+
+SCAN_OPTIONS: list[tuple[str, str, str]] = [
+    ("--format table", READY, "Grouped, colourised output for reading."),
+    ("--format json", READY, "Machine-readable. Warnings stay on stderr so pipes stay clean."),
+    ("--format sarif", "phase 7", "GitHub's Security tab ingests this."),
+    ("--min-severity", READY, "Threshold, not a single level: high means high and critical."),
+    ("--offline", READY, "No network. Serves cached advisories only."),
+    ("--python", READY, "Point at the scanned project's virtualenv explicitly."),
+    ("--only-reachable", "phase 4", "Hide findings your code provably cannot reach."),
+    ("--fail-on", "partial", "any works now; reachable needs the call graph."),
+]
+
+CONCEPTS: list[tuple[str, str]] = [
+    (
+        "Severity",
+        "critical, high, medium, low, or unknown. Unknown means no severity was ever "
+        "published, and those findings are never hidden by --min-severity: a data gap "
+        "is not evidence of low risk.",
+    ),
+    (
+        "Direct vs transitive",
+        "Depth from your project. Direct dependencies can be fixed with a version bump; "
+        "transitive ones may need an override or a lockfile refresh.",
+    ),
+    (
+        "Fix shape",
+        "How a finding can actually be fixed: DIRECT_BUMP, OVERRIDE, LOCKFILE_REFRESH, "
+        "BACKPORT_EXISTS, or NO_FIX. Landing in phase 2.",
+    ),
+    (
+        "Reachability",
+        "Whether a call path exists from your code to the vulnerable symbol. Three "
+        "verdicts: REACHABLE, NOT_REACHABLE, and UNKNOWN. Landing in phase 4.",
+    ),
+    (
+        "UNKNOWN is not safe",
+        "When dynamic dispatch sits on any partial path, the verdict is UNKNOWN, never "
+        "NOT_REACHABLE. A false 'you are safe' is the one error that makes a security "
+        "tool worse than useless.",
+    ),
+]
+
+
+def _status_style(status: str) -> str:
+    return {READY: "green", "partial": "yellow"}.get(status, "dim")
+
+
+def _entry_table(rows: list[tuple[str, str, str]]) -> Table:
+    table = Table(box=None, show_header=False, expand=True, pad_edge=False, padding=(0, 1))
+    table.add_column(width=18, no_wrap=True)
+    table.add_column(width=9, no_wrap=True)
+    table.add_column(ratio=1, overflow="fold")
+
+    for name, status, description in rows:
+        table.add_row(
+            Text(f" {name}", style="bold cyan"),
+            Text(status, style=_status_style(status)),
+            Text(description, style="dim" if status != READY else ""),
+        )
+    return table
+
+
+def _section(title: str) -> Text:
+    return Text(f"\n  {title}", style="bold white")
+
+
+def render_guide() -> None:
+    console.print()
+    console.print(
+        Panel(
+            Text.assemble(
+                Text("vulnpath", style="bold cyan"),
+                Text("  reachability-aware dependency triage for Python\n", style="white"),
+                Text(
+                    "Every scanner tells you which packages have CVEs. This one is being "
+                    "built to tell you which ones your code actually reaches, and what "
+                    "shape of fix each needs.",
+                    style="dim",
+                ),
+            ),
+            box=box.ROUNDED,
+            border_style="cyan",
+            padding=(0, 2),
+        )
+    )
+
+    console.print(_section("COMMANDS"))
+    console.print(_entry_table(COMMANDS))
+
+    console.print(_section("SCAN OPTIONS"))
+    console.print(_entry_table(SCAN_OPTIONS))
+
+    console.print(_section("CONCEPTS"))
+    concepts = Table(box=None, show_header=False, expand=True, pad_edge=False, padding=(0, 1))
+    concepts.add_column(width=24, overflow="fold")
+    concepts.add_column(ratio=1, overflow="fold")
+    for term, meaning in CONCEPTS:
+        concepts.add_row(Text(f" {term}", style="bold"), Text(meaning, style="dim"))
+    console.print(concepts)
+
+    console.print(_section("EXAMPLES"))
+    examples = Table(box=None, show_header=False, expand=True, pad_edge=False, padding=(0, 1))
+    examples.add_column(width=42, overflow="fold")
+    examples.add_column(ratio=1, overflow="fold")
+    for example, why in [
+        ("vulnpath scan .", "everything in this project"),
+        ("vulnpath scan . --min-severity high", "only what is worth today"),
+        ("vulnpath scan . --format json | jq", "feed a script"),
+        ("vulnpath scan . --fail-on any", "gate a CI build"),
+        ("vulnpath scan . --offline", "no network, no key"),
+        ("vulnpath scan ../other-project", "any path, not just here"),
+    ]:
+        examples.add_row(Text(f" $ {example}", style="green"), Text(why, style="dim"))
+    console.print(examples)
+    console.print()
+
+
 @contextmanager
 def working(message: str) -> Generator[None]:
     """Spinner while the network is being waited on.
