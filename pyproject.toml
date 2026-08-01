@@ -5,6 +5,8 @@ description = "Reachability-aware dependency triage for Python: does your code a
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "httpx>=0.28.1",
+    "pydantic>=2.13.4",
     "rich>=15.0.0",
     "typer>=0.27.0",
 ]
