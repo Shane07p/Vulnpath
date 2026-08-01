@@ -6,12 +6,26 @@ rename or drop a flag — that breaks anyone's CI invocation.
 
 from pathlib import Path
 
+import typer.main
+from typer.core import TyperGroup
 from typer.testing import CliRunner
 
 from vulnpath import __version__
 from vulnpath.cli import app
 
 runner = CliRunner()
+
+
+def declared_options(command_name: str) -> set[str]:
+    """Every option string the parser will accept for a subcommand.
+
+    Introspects the parser instead of scraping ``--help``. Help text is rendered by
+    Rich, and whether it carries colour escapes depends on the terminal — so
+    substring assertions against it pass locally and fail in CI.
+    """
+    group = typer.main.get_command(app)
+    assert isinstance(group, TyperGroup)
+    return {opt for param in group.commands[command_name].params for opt in param.opts}
 
 
 def test_version_flag() -> None:
@@ -31,10 +45,13 @@ def test_scan_rejects_a_missing_path() -> None:
 
 
 def test_scan_declares_the_full_flag_surface() -> None:
-    result = runner.invoke(app, ["scan", "--help"])
-    assert result.exit_code == 0
+    options = declared_options("scan")
     for flag in ("--format", "--offline", "--only-reachable", "--min-severity", "--fail-on"):
-        assert flag in result.output
+        assert flag in options
+
+
+def test_scan_help_renders() -> None:
+    assert runner.invoke(app, ["scan", "--help"]).exit_code == 0
 
 
 def test_scan_rejects_an_unknown_format() -> None:
