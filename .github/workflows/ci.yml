@@ -58,9 +58,14 @@ jobs:
         run: uv export --format requirements-txt --no-hashes -o /tmp/fixture-reqs.txt
 
       - name: Audit the fixture with pip-audit
-        run: >
-          uvx pip-audit -r /tmp/fixture-reqs.txt --no-deps
-          --vulnerability-service osv -f json -o /tmp/pip-audit.json
+        # pip-audit exits 1 when it finds vulnerabilities, and this fixture is built to
+        # be vulnerable — a zero exit here would mean the fixture had stopped working.
+        # Tolerate the status, then require that it actually produced output, so a real
+        # failure still fails the step.
+        run: |
+          uvx pip-audit -r /tmp/fixture-reqs.txt --no-deps \
+            --vulnerability-service osv -f json -o /tmp/pip-audit.json || true
+          test -s /tmp/pip-audit.json
 
       - name: Scan the fixture with vulnpath
         run: uv run vulnpath scan tests/fixtures/sample_project --format json > /tmp/vulnpath.json
