@@ -1,5 +1,6 @@
 """Lockfile parsing, against real resolver output."""
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -95,3 +96,41 @@ def test_unsupported_lock_version_is_rejected(tmp_path: Path) -> None:
     (tmp_path / "uv.lock").write_text('version = 99\n[[package]]\nname="x"\n', encoding="utf-8")
     with pytest.raises(LockfileError, match="lock version"):
         load_lockfile(tmp_path)
+
+
+# --- forked resolutions -----------------------------------------------------------
+# A lockfile spanning several Python versions resolves the same package more than once.
+# Keeping only the last entry seen drops genuinely installed versions from the scan,
+# and the dropped one is often the older, vulnerable one.
+
+FORKED_PROJECT = Path(__file__).parent / "fixtures" / "forked_project"
+
+
+def _resolved_urllib3_versions() -> set[str]:
+    """Straight from the lockfile, bypassing the parser under test."""
+    raw = tomllib.loads((FORKED_PROJECT / "uv.lock").read_text(encoding="utf-8"))
+    return {p["version"] for p in raw["package"] if p["name"] == "urllib3"}
+
+
+def test_forked_fixture_really_does_fork() -> None:
+    """Guards the fixture itself: if uv stops forking here, the tests below prove nothing."""
+    assert len(_resolved_urllib3_versions()) > 1
+
+
+def test_every_resolved_version_is_scanned() -> None:
+    graph = load_lockfile(FORKED_PROJECT)
+    scanned = {p.version for p in graph.scannable if p.name == "urllib3"}
+    assert scanned == _resolved_urllib3_versions()
+
+
+def test_forked_versions_are_not_lost_from_the_graph() -> None:
+    graph = load_lockfile(FORKED_PROJECT)
+    assert graph.extra_versions
+    assert all(p.name == "urllib3" for p in graph.extra_versions)
+
+
+def test_forked_versions_inherit_the_depth_of_their_name() -> None:
+    """They are the same node in the dependency graph, just resolved differently."""
+    graph = load_lockfile(FORKED_PROJECT)
+    primary = graph.packages["urllib3"]
+    assert all(p.depth == primary.depth for p in graph.extra_versions)

@@ -32,6 +32,15 @@ class DependencyGraph:
     packages: dict[str, Package]
     root: str | None
     _parents: dict[str, set[str]] = field(default_factory=dict)
+    extra_versions: tuple[Package, ...] = ()
+    """Additional resolved versions of a package already in ``packages``.
+
+    A forked resolution — one lockfile covering several Python versions or platforms —
+    emits multiple ``[[package]]`` entries for the same name at different versions.
+    They are all installed somewhere, so they are all scanned. Keeping them out of
+    ``packages`` leaves graph traversal keyed by name, which is what dependency edges
+    reference.
+    """
 
     def parents_of(self, name: str) -> set[str]:
         """Packages that depend on ``name``. Empty for the root project."""
@@ -42,8 +51,8 @@ class DependencyGraph:
 
     @property
     def scannable(self) -> list[Package]:
-        """Every package except the project itself — the project has no advisories."""
-        return [p for p in self.packages.values() if not p.is_root]
+        """Every resolved package except the project itself, including forked versions."""
+        return [p for p in self.packages.values() if not p.is_root] + list(self.extra_versions)
 
 
 def _find_root(raw_packages: list[dict[str, object]]) -> str | None:
@@ -126,6 +135,7 @@ def load_lockfile(project_path: Path) -> DependencyGraph:
     root = _find_root(raw_packages)
 
     packages: dict[str, Package] = {}
+    forked: list[Package] = []
     for entry in raw_packages:
         if not isinstance(entry, dict):
             continue
@@ -134,21 +144,36 @@ def load_lockfile(project_path: Path) -> DependencyGraph:
         if not isinstance(name, str) or not isinstance(raw_version, str):
             continue
         key = normalise(name)
-        packages[key] = Package(
+        package = Package(
             name=key,
             version=raw_version,
             dependencies=_dependency_names(entry),
             is_root=key == root,
         )
+        if key in packages:
+            # A forked resolution lists the same package at several versions. Keeping
+            # only the last one seen would drop a genuinely installed version from the
+            # scan entirely — and it is often the older, vulnerable one.
+            forked.append(package)
+        else:
+            packages[key] = package
 
     if not packages:
         raise LockfileError(f"{lock_path} contains no usable package entries.")
 
     packages = _assign_depths(packages, root)
+    forked = [
+        p.model_copy(update={"depth": packages[p.name].depth}) for p in forked if p.name in packages
+    ]
 
     parents: dict[str, set[str]] = {}
     for pkg in packages.values():
         for dep in pkg.dependencies:
             parents.setdefault(dep, set()).add(pkg.name)
 
-    return DependencyGraph(packages=packages, root=root, _parents=parents)
+    return DependencyGraph(
+        packages=packages,
+        root=root,
+        _parents=parents,
+        extra_versions=tuple(forked),
+    )

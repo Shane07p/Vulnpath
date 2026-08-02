@@ -1,0 +1,8 @@
+[project]
+name = "forked-project"
+version = "0.1.0"
+description = "Fixture: a resolution that forks across Python versions, producing two resolved versions of the same package."
+requires-python = ">=3.8"
+dependencies = [
+    "urllib3",
+]
