@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Weekly. Advisories are published continuously, so parity with pip-audit can break
+    # without anything in this repo changing.
+    - cron: "0 6 * * 1"
 
 jobs:
   check:
@@ -32,3 +36,34 @@ jobs:
 
       - name: Tests
         run: uv run pytest
+
+  parity:
+    # Phase 1's gate: vulnpath must not miss anything pip-audit finds. Kept out of the
+    # `check` job because it needs the network and compares against a moving target, so
+    # a failure here means something different from a failing unit test.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync
+        run: uv sync --all-extras --dev
+
+      - name: Export the fixture lockfile to requirements
+        working-directory: tests/fixtures/sample_project
+        run: uv export --format requirements-txt --no-hashes -o /tmp/fixture-reqs.txt
+
+      - name: Audit the fixture with pip-audit
+        run: >
+          uvx pip-audit -r /tmp/fixture-reqs.txt --no-deps
+          --vulnerability-service osv -f json -o /tmp/pip-audit.json
+
+      - name: Scan the fixture with vulnpath
+        run: uv run vulnpath scan tests/fixtures/sample_project --format json > /tmp/vulnpath.json
+
+      - name: Compare
+        run: uv run python scripts/parity_check.py /tmp/pip-audit.json /tmp/vulnpath.json
