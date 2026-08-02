@@ -121,13 +121,16 @@ def scan(
         render.render_table(result)
         for message in environment_drift(path, python):
             render.warn(message)
-        if offline and result.offline:
-            render.warn("Offline: only cached advisories were consulted.")
+
+    if not result.is_complete:
+        render.warn(
+            f"{result.packages_unqueried} package(s) could not be checked "
+            f"{'(offline, not cached)' if offline else '(OSV unreachable)'}. "
+            "This scan does not prove those are clean."
+        )
 
     if fail_on is FailOn.ANY and result.findings:
         raise typer.Exit(1)
-    if fail_on is FailOn.REACHABLE:
-        render.warn("--fail-on reachable cannot gate yet; reachability analysis is not built.")
 
 
 @app.command()

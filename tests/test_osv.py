@@ -1,10 +1,14 @@
-"""Advisory parsing, deduplication and caching. No network."""
+"""Advisory parsing, deduplication, caching and failure handling."""
 
 from pathlib import Path
+from unittest import mock
 
-from vulnpath.models import Advisory, Severity
+import httpx
+
+from vulnpath.models import Advisory, Package, Severity
 from vulnpath.osv import (
     Cache,
+    OsvClient,
     OsvVulnerability,
     deduplicate,
     extract_fixed_versions,
@@ -153,3 +157,60 @@ def test_cache_round_trips_an_advisory(tmp_path: Path) -> None:
     restored = cache.read_vuln("GHSA-jjg7-2v4v-x38h")
     assert restored is not None
     assert extract_severity(restored) is Severity.MEDIUM
+
+
+# --- network failure handling -----------------------------------------------------
+# The request path had no coverage, which is how the cache-poisoning bug below shipped.
+
+
+def test_a_failed_query_is_never_written_to_the_cache(tmp_path: Path) -> None:
+    """The regression that matters most in this file.
+
+    Caching an empty result for a request that failed persists "no known
+    vulnerabilities" to disk permanently. Every later scan then serves that from cache
+    without touching the network, so one dropped connection marks a package clean
+    forever. That is the false-negative failure mode the project forbids.
+    """
+    client = OsvClient(tmp_path, offline=False)
+    packages = [Package(name="pyyaml", version="5.3.1", depth=1)]
+
+    with mock.patch("httpx.post", side_effect=httpx.ConnectError("network down")):
+        assert client.advisories_for(packages) == {}
+
+    assert list((tmp_path / "queries").glob("*.json")) == []
+    assert client.packages_unqueried == 1
+
+
+def test_a_later_scan_retries_a_package_whose_query_failed(tmp_path: Path) -> None:
+    client = OsvClient(tmp_path, offline=False)
+    packages = [Package(name="pyyaml", version="5.3.1", depth=1)]
+    with mock.patch("httpx.post", side_effect=httpx.ConnectError("network down")):
+        client.advisories_for(packages)
+
+    retried = OsvClient(tmp_path, offline=False)
+    with mock.patch("httpx.post", side_effect=httpx.ConnectError("still down")) as post:
+        retried.advisories_for(packages)
+
+    assert post.called, "a failed lookup must not be remembered as a clean result"
+
+
+def test_a_genuinely_clean_package_is_cached(tmp_path: Path) -> None:
+    """The other half: an empty answer OSV actually gave is a real result."""
+    client = OsvClient(tmp_path, offline=False)
+    packages = [Package(name="pyyaml", version="5.3.1", depth=1)]
+
+    response = mock.Mock()
+    response.raise_for_status = mock.Mock()
+    response.json = mock.Mock(return_value={"results": [{}]})
+
+    with mock.patch("httpx.post", return_value=response):
+        client.advisories_for(packages)
+
+    assert client.cache.read_query("pyyaml@5.3.1") == []
+    assert client.packages_unqueried == 0
+
+
+def test_offline_with_nothing_cached_reports_the_gap(tmp_path: Path) -> None:
+    client = OsvClient(tmp_path, offline=True)
+    client.advisories_for([Package(name="pyyaml", version="5.3.1", depth=1)])
+    assert client.packages_unqueried == 1

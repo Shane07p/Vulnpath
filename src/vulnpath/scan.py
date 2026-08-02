@@ -78,4 +78,5 @@ def run_scan(
         packages_scanned=len(packages),
         offline=offline,
         advisories_from_cache=client.cache_hits,
+        packages_unqueried=client.packages_unqueried,
     )

@@ -255,8 +255,12 @@ class OsvClient:
         self.offline = offline
         self.timeout = timeout
         self.cache_hits = 0
-        self.uncached_misses = 0
-        """Packages skipped because offline and not cached — reported as reduced coverage."""
+        self.packages_unqueried = 0
+        """Packages whose advisory list could not be obtained at all.
+
+        Either offline with nothing cached, or the request failed. These are gaps in
+        coverage, not evidence of a clean package, and the renderers say so.
+        """
 
     def advisories_for(self, packages: list[Package]) -> dict[str, list[Advisory]]:
         """Advisory list per normalised package name."""
@@ -290,18 +294,33 @@ class OsvClient:
             return found
 
         if self.offline:
-            self.uncached_misses += len(pending)
+            self.packages_unqueried += len(pending)
             return found
 
         for start in range(0, len(pending), BATCH_SIZE):
             chunk = pending[start : start + BATCH_SIZE]
-            for package, ids in zip(chunk, self._querybatch(chunk), strict=True):
+            results = self._querybatch(chunk)
+            if results is None:
+                # The request failed. Record the gap and move on WITHOUT caching —
+                # writing an empty list here would persist "no known vulnerabilities"
+                # to disk permanently, and every later scan would serve that from
+                # cache without touching the network. One dropped connection would
+                # silently mark a package clean forever.
+                self.packages_unqueried += len(chunk)
+                continue
+            for package, ids in zip(chunk, results, strict=True):
                 found[package.name] = ids
                 self.cache.write_query(f"{package.name}@{package.version}", ids)
 
         return found
 
-    def _querybatch(self, packages: list[Package]) -> list[list[str]]:
+    def _querybatch(self, packages: list[Package]) -> list[list[str]] | None:
+        """Advisory ids per package, or ``None`` if the query could not be answered.
+
+        The ``None`` matters: "OSV said this package is clean" and "OSV could not be
+        reached" must not share a representation. Collapsing them is how a network
+        failure becomes a permanent false negative.
+        """
         payload = {
             "queries": [
                 {"package": {"name": p.name, "ecosystem": "PyPI"}, "version": p.version}
@@ -313,11 +332,11 @@ class OsvClient:
             response.raise_for_status()
             body = response.json()
         except (httpx.HTTPError, json.JSONDecodeError):
-            return [[] for _ in packages]
+            return None
 
         results = body.get("results") if isinstance(body, dict) else None
         if not isinstance(results, list) or len(results) != len(packages):
-            return [[] for _ in packages]
+            return None
 
         out: list[list[str]] = []
         for entry in results:

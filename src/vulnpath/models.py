@@ -108,6 +108,18 @@ class ScanResult(BaseModel):
     offline: bool = False
     advisories_from_cache: int = 0
 
+    packages_unqueried: int = 0
+    """Packages whose advisories could not be retrieved.
+
+    Zero findings and incomplete coverage are different results, and a machine reading
+    ``--format json`` has no other way to tell them apart. Non-zero means this scan does
+    not prove anything about those packages.
+    """
+
+    @property
+    def is_complete(self) -> bool:
+        return self.packages_unqueried == 0
+
     @property
     def sorted_findings(self) -> list[Finding]:
         return sorted(self.findings, key=lambda f: f.sort_key)
