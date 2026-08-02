@@ -103,6 +103,12 @@ def scan(
     if output_format is OutputFormat.SARIF:
         render.error("SARIF output is not implemented yet.")
         raise typer.Exit(2)
+    if fail_on is FailOn.REACHABLE:
+        # Exit rather than warn. A CI gate configured with this flag would otherwise
+        # pass every build while printing a warning nobody reads into stderr, which is
+        # worse than having no gate at all.
+        render.error("--fail-on reachable cannot gate yet; reachability analysis is not built.")
+        raise typer.Exit(2)
     if only_reachable:
         render.warn("--only-reachable has no effect yet; reachability analysis is not built.")
 

@@ -214,3 +214,24 @@ def test_offline_with_nothing_cached_reports_the_gap(tmp_path: Path) -> None:
     client = OsvClient(tmp_path, offline=True)
     client.advisories_for([Package(name="pyyaml", version="5.3.1", depth=1)])
     assert client.packages_unqueried == 1
+
+
+# --- merge correctness ------------------------------------------------------------
+
+
+def test_merge_takes_the_worst_severity_not_the_longest_summary() -> None:
+    """One database rating a flaw LOW must not override another rating it CRITICAL."""
+    merged = deduplicate(
+        [
+            Advisory(id="A", aliases=("CVE-1",), summary="x" * 200, severity=Severity.LOW),
+            Advisory(id="B", aliases=("CVE-1",), summary="short", severity=Severity.CRITICAL),
+        ]
+    )[0]
+    assert merged.severity is Severity.CRITICAL
+
+
+def test_merged_records_keep_their_ids_as_aliases() -> None:
+    """Otherwise `explain PYSEC-2024-60` can never match a merged advisory."""
+    merged = deduplicate(_pair())[0]
+    assert "PYSEC-2024-60" in merged.aliases
+    assert "GHSA-jjg7-2v4v-x38h" in merged.aliases

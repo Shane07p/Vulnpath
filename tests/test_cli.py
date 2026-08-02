@@ -86,3 +86,13 @@ def test_explain_takes_an_advisory_id() -> None:
     result = runner.invoke(app, ["explain", "CVE-2020-14343"])
     assert result.exit_code == 0
     assert "CVE-2020-14343" in result.output
+
+
+def test_fail_on_reachable_refuses_rather_than_passing_silently(tmp_path: Path) -> None:
+    """A gate that cannot gate must fail loudly.
+
+    Warning and exiting 0 would leave a CI job configured with this flag green on
+    every build, which is worse than having no gate configured at all.
+    """
+    result = runner.invoke(app, ["scan", str(tmp_path), "--fail-on", "reachable"])
+    assert result.exit_code == 2

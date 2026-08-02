@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict
 
-from vulnpath.models import Advisory, Package, Severity, normalise
+from vulnpath.models import Advisory, Package, Severity, normalise, severity_rank
 
 OSV_API = "https://api.osv.dev"
 BATCH_SIZE = 100
@@ -131,17 +131,21 @@ def _merge(group: list[Advisory]) -> Advisory:
     """
     primary = max(group, key=lambda a: (a.severity is not Severity.UNKNOWN, len(a.summary)))
 
-    severity = primary.severity
-    for advisory in group:
-        if severity is Severity.UNKNOWN:
-            severity = advisory.severity
+    # The worst severity anyone published, not the primary record's. Picking the record
+    # with the longest summary and taking its severity would let a database that rated
+    # something LOW override another that rated the same flaw CRITICAL.
+    severity = max((a.severity for a in group), key=severity_rank)
 
     def _union(values: list[tuple[str, ...]]) -> tuple[str, ...]:
         return tuple(dict.fromkeys(item for group_ in values for item in group_))
 
     return Advisory(
         id=primary.id,
-        aliases=_union([a.aliases for a in group]),
+        # Every merged record's own id becomes an alias. Without this the dropped
+        # record's id is unreachable — `vulnpath explain PYSEC-2024-60` would never
+        # match, and a cache keyed by advisory id would miss the same advisory
+        # arriving under a different database's identifier.
+        aliases=_union([a.aliases for a in group] + [tuple(a.id for a in group)]),
         summary=max((a.summary for a in group), key=len),
         details=max((a.details for a in group), key=len),
         severity=severity,
