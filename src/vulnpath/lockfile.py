@@ -42,6 +42,15 @@ class DependencyGraph:
     reference.
     """
 
+    declared: dict[str, str] = field(default_factory=dict)
+    """The root project's own constraint per package, as written in the manifest.
+
+    uv.lock records dependency edges without specifiers, so a *parent's* constraint is
+    not available here — only the root's. This is what separates "your manifest forbids
+    the fix, edit it" from "your manifest already allows the fix, the lockfile is
+    stale".
+    """
+
     def parents_of(self, name: str) -> set[str]:
         """Packages that depend on ``name``. Empty for the root project."""
         return self._parents.get(normalise(name), set())
@@ -77,6 +86,30 @@ def _dependency_names(entry: dict[str, object]) -> tuple[str, ...]:
             if isinstance(name, str):
                 names.append(normalise(name))
     return tuple(names)
+
+
+def _declared_constraints(entry: dict[str, object]) -> dict[str, str]:
+    """The root's ``metadata.requires-dist`` as normalised name to specifier string.
+
+    A dependency listed with no specifier is unconstrained and is omitted, which reads
+    the same to every caller as an absent entry.
+    """
+    metadata = entry.get("metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    requires = metadata.get("requires-dist")
+    if not isinstance(requires, list):
+        return {}
+
+    declared: dict[str, str] = {}
+    for requirement in requires:
+        if not isinstance(requirement, dict):
+            continue
+        name = requirement.get("name")
+        specifier = requirement.get("specifier")
+        if isinstance(name, str) and isinstance(specifier, str) and specifier:
+            declared[normalise(name)] = specifier
+    return declared
 
 
 def _assign_depths(packages: dict[str, Package], root: str | None) -> dict[str, Package]:
@@ -136,6 +169,7 @@ def load_lockfile(project_path: Path) -> DependencyGraph:
 
     packages: dict[str, Package] = {}
     forked: list[Package] = []
+    declared: dict[str, str] = {}
     for entry in raw_packages:
         if not isinstance(entry, dict):
             continue
@@ -158,6 +192,9 @@ def load_lockfile(project_path: Path) -> DependencyGraph:
         else:
             packages[key] = package
 
+        if key == root:
+            declared = _declared_constraints(entry)
+
     if not packages:
         raise LockfileError(f"{lock_path} contains no usable package entries.")
 
@@ -176,4 +213,5 @@ def load_lockfile(project_path: Path) -> DependencyGraph:
         root=root,
         _parents=parents,
         extra_versions=tuple(forked),
+        declared=declared,
     )

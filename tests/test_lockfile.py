@@ -134,3 +134,36 @@ def test_forked_versions_inherit_the_depth_of_their_name() -> None:
     graph = load_lockfile(FORKED_PROJECT)
     primary = graph.packages["urllib3"]
     assert all(p.depth == primary.depth for p in graph.extra_versions)
+
+
+# --- the root's own constraints ----------------------------------------------------
+# uv.lock records dependency edges without specifiers, so a parent's constraint is not
+# in the file. The one exception is the root project, whose metadata.requires-dist does
+# carry them — and that is what decides whether a direct dependency needs a manifest
+# edit or only a relock.
+
+
+def test_root_declared_constraints_are_parsed() -> None:
+    graph = load_lockfile(SAMPLE_PROJECT)
+    assert graph.declared["pyyaml"] == "==5.3.1"
+    assert graph.declared["urllib3"] == "==1.26.5"
+
+
+def test_transitive_packages_have_no_declared_constraint() -> None:
+    """The root never names them, so it constrains nothing about them."""
+    graph = load_lockfile(SAMPLE_PROJECT)
+    assert "markupsafe" not in graph.declared
+    assert "certifi" not in graph.declared
+
+
+def test_declared_names_are_normalised() -> None:
+    graph = load_lockfile(SAMPLE_PROJECT)
+    assert all(name == normalise(name) for name in graph.declared)
+
+
+def test_a_lockfile_without_root_metadata_declares_nothing(tmp_path: Path) -> None:
+    (tmp_path / "uv.lock").write_text(
+        'version = 1\n\n[[package]]\nname = "solo"\nversion = "1.0.0"\n',
+        encoding="utf-8",
+    )
+    assert load_lockfile(tmp_path).declared == {}
