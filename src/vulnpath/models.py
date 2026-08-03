@@ -67,6 +67,20 @@ class Package(BaseModel):
         return self.depth == 1
 
 
+class AffectedRange(BaseModel):
+    """One interval of affected versions, as OSV expresses it.
+
+    A range opens at ``introduced`` and closes at ``fixed`` (exclusive) or
+    ``last_affected`` (inclusive). Without these, the only versions known to be safe
+    are the ones an advisory explicitly names as fixed — which is not enough to tell
+    whether some other release is affected.
+    """
+
+    introduced: str | None = None
+    fixed: str | None = None
+    last_affected: str | None = None
+
+
 class Advisory(BaseModel):
     """One OSV advisory, reduced to the fields this tool uses."""
 
@@ -76,6 +90,7 @@ class Advisory(BaseModel):
     details: str = ""
     severity: Severity = Severity.UNKNOWN
     fixed_versions: tuple[str, ...] = ()
+    affected_ranges: tuple[AffectedRange, ...] = ()
     references: tuple[str, ...] = ()
 
     @property
