@@ -87,11 +87,59 @@ class Advisory(BaseModel):
         return self.id
 
 
+class FixShape(StrEnum):
+    """What kind of change closes a finding.
+
+    ``UNKNOWN`` is not a sixth kind of fix — it means classification could not be
+    completed, usually because PyPI was unreachable. Reporting ``NO_FIX`` in that
+    situation would state that no fix exists on the strength of a network failure.
+    """
+
+    DIRECT_BUMP = "direct_bump"
+    OVERRIDE = "override"
+    LOCKFILE_REFRESH = "lockfile_refresh"
+    BACKPORT_EXISTS = "backport_exists"
+    NO_FIX = "no_fix"
+    UNKNOWN = "unknown"
+
+
+class BlockingParent(BaseModel):
+    """A dependency whose constraint forbids the fixed version."""
+
+    name: str
+    constraint: str
+
+    upgrade_to: str | None = None
+    """Newest release of this parent whose constraint permits the fix, if one exists.
+
+    Upgrading the parent is nearly always better advice than forcing an override,
+    because an override pins a version the parent never declared support for.
+    """
+
+
+class Fix(BaseModel):
+    """How a finding can be resolved."""
+
+    shape: FixShape
+    target_version: str | None = None
+    command: str | None = None
+    reason: str = ""
+    blocking_parents: tuple[BlockingParent, ...] = ()
+
+    @property
+    def is_actionable(self) -> bool:
+        """True when the tool can name a specific version to move to."""
+        return self.shape not in {FixShape.NO_FIX, FixShape.UNKNOWN}
+
+
 class Finding(BaseModel):
     """A package in this project matched against an advisory affecting it."""
 
     package: Package
     advisory: Advisory
+
+    fix: Fix | None = None
+    """Set by classification, which runs after advisory matching."""
 
     @property
     def sort_key(self) -> tuple[int, int, str]:
