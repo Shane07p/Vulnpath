@@ -16,7 +16,14 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict
 
-from vulnpath.models import Advisory, Package, Severity, normalise, severity_rank
+from vulnpath.models import (
+    Advisory,
+    AffectedRange,
+    Package,
+    Severity,
+    normalise,
+    severity_rank,
+)
 
 OSV_API = "https://api.osv.dev"
 BATCH_SIZE = 100
@@ -122,6 +129,39 @@ def extract_fixed_versions(vuln: OsvVulnerability, package_name: str) -> tuple[s
     return tuple(dict.fromkeys(fixed))
 
 
+def extract_affected_ranges(vuln: OsvVulnerability, package_name: str) -> tuple[AffectedRange, ...]:
+    """The intervals of versions this advisory says are affected, for this package.
+
+    Needed to answer whether a release the advisory never mentions is safe. Knowing
+    only the fixed versions cannot answer that, and guessing would mean recommending
+    an upgrade with no evidence it fixes anything.
+    """
+    wanted = normalise(package_name)
+    ranges: list[AffectedRange] = []
+    for affected in vuln.affected:
+        if normalise(affected.package.name) != wanted:
+            continue
+        for range_ in affected.ranges:
+            if range_.type.upper() not in {"ECOSYSTEM", "SEMVER"}:
+                continue
+            introduced: str | None = None
+            for event in range_.events:
+                if event.introduced is not None:
+                    introduced = event.introduced
+                elif event.fixed is not None or event.last_affected is not None:
+                    ranges.append(
+                        AffectedRange(
+                            introduced=introduced,
+                            fixed=event.fixed,
+                            last_affected=event.last_affected,
+                        )
+                    )
+                    introduced = None
+            if introduced is not None:
+                ranges.append(AffectedRange(introduced=introduced))
+    return tuple(ranges)
+
+
 def _merge(group: list[Advisory]) -> Advisory:
     """Fold records describing the same CVE into one.
 
@@ -150,6 +190,11 @@ def _merge(group: list[Advisory]) -> Advisory:
         details=max((a.details for a in group), key=len),
         severity=severity,
         fixed_versions=_union([a.fixed_versions for a in group]),
+        # Union of ranges, not the primary's. One database can describe an interval
+        # the other omits, and a missing interval reads as "not affected".
+        affected_ranges=tuple(
+            dict.fromkeys(r for advisory in group for r in advisory.affected_ranges)
+        ),
         references=_union([a.references for a in group]),
     )
 
@@ -175,6 +220,7 @@ def to_advisory(vuln: OsvVulnerability, package_name: str) -> Advisory:
         details=vuln.details,
         severity=extract_severity(vuln),
         fixed_versions=extract_fixed_versions(vuln, package_name),
+        affected_ranges=extract_affected_ranges(vuln, package_name),
         references=tuple(ref.url for ref in vuln.references if ref.url),
     )
 
@@ -191,7 +237,7 @@ def default_cache_dir() -> Path:
     return Path(base) / "vulnpath"
 
 
-def _safe(key: str) -> str:
+def safe_key(key: str) -> str:
     return _UNSAFE.sub("_", key)[:120]
 
 
@@ -203,33 +249,33 @@ class Cache:
         self.vulns = root / "vulns"
 
     def read_query(self, key: str) -> list[str] | None:
-        path = self.queries / f"{_safe(key)}.json"
-        data = _read_json(path)
+        path = self.queries / f"{safe_key(key)}.json"
+        data = read_json(path)
         if isinstance(data, list) and all(isinstance(i, str) for i in data):
             return [str(i) for i in data]
         return None
 
     def write_query(self, key: str, ids: list[str]) -> None:
-        _write_json(self.queries / f"{_safe(key)}.json", ids)
+        write_json(self.queries / f"{safe_key(key)}.json", ids)
 
     def read_vuln(self, advisory_id: str) -> OsvVulnerability | None:
-        data = _read_json(self.vulns / f"{_safe(advisory_id)}.json")
+        data = read_json(self.vulns / f"{safe_key(advisory_id)}.json")
         if isinstance(data, dict):
             return OsvVulnerability.model_validate(data)
         return None
 
     def write_vuln(self, advisory_id: str, payload: dict[str, Any]) -> None:
-        _write_json(self.vulns / f"{_safe(advisory_id)}.json", payload)
+        write_json(self.vulns / f"{safe_key(advisory_id)}.json", payload)
 
 
-def _read_json(path: Path) -> Any:
+def read_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
 
 
-def _write_json(path: Path, payload: Any) -> None:
+def write_json(path: Path, payload: Any) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
