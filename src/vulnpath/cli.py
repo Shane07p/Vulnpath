@@ -1,7 +1,9 @@
 """CLI surface.
 
-The flag set is declared in full from the start so later phases fill in behaviour
-instead of renegotiating names. Everything here is currently inert.
+Flag names are a public contract — someone's CI invokes them — so the full set is
+declared up front and later work fills in behaviour rather than renaming anything.
+Options that are not yet implemented say so and exit rather than being silently
+accepted.
 """
 
 from enum import StrEnum
@@ -150,4 +152,4 @@ def explain(
     advisory_id: Annotated[str, typer.Argument(help="Advisory ID, e.g. CVE-2020-14343.")],
 ) -> None:
     """Show the full reachability path and fix reasoning for one finding."""
-    console.print(f"[yellow]explain {advisory_id}: not implemented yet (phase 0 skeleton)[/yellow]")
+    console.print(f"[yellow]explain {advisory_id}: not implemented yet[/yellow]")

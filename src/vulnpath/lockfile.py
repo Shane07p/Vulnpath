@@ -25,8 +25,8 @@ class DependencyGraph:
     """Resolved packages plus the edges between them.
 
     A plain dict of adjacency, not a graph library. The package graph is small and
-    needs custom node data; the call graph in a later phase is a different shape and
-    is where a graph library earns its place.
+    needs custom node data. The call graph this tool will build over source symbols is a
+    different shape entirely, and is where a graph library earns its place.
     """
 
     packages: dict[str, Package]

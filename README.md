@@ -5,8 +5,8 @@ Reachability-aware dependency triage for Python.
 Every scanner tells you which packages have CVEs. Vulnpath is being built to tell you
 which ones your code actually reaches, and what shape of fix each one needs.
 
-> **Status: early.** Phase 1 of 8. Advisory matching works and is verified against
-> `pip-audit`. Reachability analysis — the reason this project exists — is not built yet.
+> **Status: early.** Advisory matching works and is verified against `pip-audit`.
+> Reachability analysis — the reason this project exists — is not built yet.
 > Everything below distinguishes what runs today from what does not.
 
 ## The problem
@@ -47,8 +47,8 @@ Not built yet: reachability analysis, fix-shape classification, SARIF output,
 
 ## Verified against pip-audit
 
-Phase 1's bar was parity with an established scanner. Against the checked-in fixture
-project, comparing on the same advisory source:
+Before its own analysis means anything, this has to find everything an established
+scanner finds. Against the checked-in fixture project, on the same advisory source:
 
 | | Advisory records | Distinct CVEs | Packages |
 |---|---|---|---|

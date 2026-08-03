@@ -207,26 +207,28 @@ def render_json(result: ScanResult) -> None:
 
 
 # --- guide ------------------------------------------------------------------------
-# Most of this tool is not built yet. A guide that quietly lists unimplemented flags
-# alongside working ones would be worse than no guide, so every entry carries status.
+# A guide that lists an unimplemented flag beside a working one is worse than no
+# guide: someone will use it and assume it did something. Every entry carries status.
 
 READY = "ready"
+PLANNED = "planned"
+PARTIAL = "partial"
 
 COMMANDS: list[tuple[str, str, str]] = [
     ("scan [PATH]", READY, "Resolve the lockfile, match advisories, print findings."),
-    ("explain <ID>", "phase 4", "Everything known about one advisory: path, fix, evidence."),
+    ("explain <ID>", PLANNED, "Everything known about one advisory: path, fix, evidence."),
     ("guide", READY, "This page."),
 ]
 
 SCAN_OPTIONS: list[tuple[str, str, str]] = [
     ("--format table", READY, "Grouped, colourised output for reading."),
     ("--format json", READY, "Machine-readable. Warnings stay on stderr so pipes stay clean."),
-    ("--format sarif", "phase 7", "GitHub's Security tab ingests this."),
+    ("--format sarif", PLANNED, "GitHub's Security tab ingests this."),
     ("--min-severity", READY, "Threshold, not a single level: high means high and critical."),
     ("--offline", READY, "No network. Serves cached advisories only."),
     ("--python", READY, "Point at the scanned project's virtualenv explicitly."),
-    ("--only-reachable", "phase 4", "Hide findings your code provably cannot reach."),
-    ("--fail-on", "partial", "any works now; reachable needs the call graph."),
+    ("--only-reachable", PLANNED, "Hide findings your code provably cannot reach."),
+    ("--fail-on", PARTIAL, "any works now; reachable needs the call graph."),
 ]
 
 CONCEPTS: list[tuple[str, str]] = [
@@ -244,12 +246,12 @@ CONCEPTS: list[tuple[str, str]] = [
     (
         "Fix shape",
         "How a finding can actually be fixed: DIRECT_BUMP, OVERRIDE, LOCKFILE_REFRESH, "
-        "BACKPORT_EXISTS, or NO_FIX. Landing in phase 2.",
+        "BACKPORT_EXISTS, or NO_FIX. Not built yet.",
     ),
     (
         "Reachability",
         "Whether a call path exists from your code to the vulnerable symbol. Three "
-        "verdicts: REACHABLE, NOT_REACHABLE, and UNKNOWN. Landing in phase 4.",
+        "verdicts: REACHABLE, NOT_REACHABLE, and UNKNOWN. Not built yet.",
     ),
     (
         "UNKNOWN is not safe",
@@ -261,7 +263,7 @@ CONCEPTS: list[tuple[str, str]] = [
 
 
 def _status_style(status: str) -> str:
-    return {READY: "green", "partial": "yellow"}.get(status, "dim")
+    return {READY: "green", PARTIAL: "yellow"}.get(status, "dim")
 
 
 def _entry_table(rows: list[tuple[str, str, str]]) -> Table:

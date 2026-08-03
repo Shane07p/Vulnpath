@@ -143,8 +143,7 @@ def test_guide_marks_unimplemented_features_rather_than_hiding_them() -> None:
     with console.capture() as capture:
         render_guide()
     output = capture.get()
-    assert "phase 4" in output
-    assert "phase 7" in output
+    assert "planned" in output
 
 
 def test_every_declared_scan_option_appears_in_the_guide() -> None:

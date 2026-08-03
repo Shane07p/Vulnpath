@@ -1,8 +1,9 @@
 """Compare vulnpath's findings against pip-audit on the same fixture.
 
-Phase 1's gate is parity with an established scanner. Asserting a fixed number would
-rot the moment a new advisory is published, so this compares *sets* of CVE identifiers
-and fails only on a miss — a CVE pip-audit found that vulnpath did not.
+Parity with an established scanner is the floor this tool has to clear before its own
+analysis means anything. Asserting a fixed count would rot the moment a new advisory
+is published, so this compares *sets* of CVE identifiers and fails only on a miss — a
+CVE pip-audit found that vulnpath did not.
 
 Extra findings on vulnpath's side are reported but do not fail: the two tools can
 legitimately diverge as OSV and pip-audit's own database drift apart, and the direction

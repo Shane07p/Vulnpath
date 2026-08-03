@@ -1,7 +1,7 @@
 """CLI contract tests.
 
-These lock the flag surface. A later phase filling in behaviour must not silently
-rename or drop a flag — that breaks anyone's CI invocation.
+These lock the flag surface. Filling in behaviour later must not silently rename or
+drop a flag — that breaks anyone's CI invocation.
 """
 
 from pathlib import Path
