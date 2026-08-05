@@ -103,7 +103,6 @@ class _Walker(ast.NodeVisitor):
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
             self.imports.append(RawImport(module=None, name=alias.name, alias=alias.asname))
-        self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         for alias in node.names:
@@ -115,14 +114,28 @@ class _Walker(ast.NodeVisitor):
                     level=node.level,
                 )
             )
-        self.generic_visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         fqn = f"{self._current}.{node.name}"
         self.definitions.append(Definition(fqn=fqn, kind="class", line=node.lineno))
-        self.bases[fqn] = tuple(
+        resolved_bases = tuple(
             name for base in node.bases if (name := dotted_name(base)) is not None
         )
+        self.bases[fqn] = resolved_bases
+        if len(resolved_bases) != len(node.bases):
+            # A base that isn't a plain name/attribute — e.g. a call — can't be
+            # followed into the inheritance chain. Say so, the same way an
+            # unresolvable call says so, rather than silently looking like no base.
+            self.dynamic.add(fqn)
+
+        # Bases, keywords (metaclass=...) and decorators evaluate at class-definition
+        # time, in the scope that contains the class — not inside the class body.
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
 
         self._scope.append(fqn)
         was_in_class, self._in_class = self._in_class, True
@@ -135,6 +148,16 @@ class _Walker(ast.NodeVisitor):
         fqn = f"{self._current}.{node.name}"
         kind = "method" if self._in_class else "function"
         self.definitions.append(Definition(fqn=fqn, kind=kind, line=node.lineno))
+
+        # Decorators and default values evaluate when the def statement runs, in the
+        # enclosing scope — not each time the function is later called.
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for default in node.args.defaults:
+            self.visit(default)
+        for kw_default in node.args.kw_defaults:
+            if kw_default is not None:
+                self.visit(kw_default)
 
         self._scope.append(fqn)
         was_in_class, self._in_class = self._in_class, False

@@ -71,6 +71,32 @@ def test_ordinary_functions_are_not_marked_dynamic() -> None:
     assert _symbols("core").dynamic == frozenset()
 
 
+def test_decorator_call_is_attributed_to_the_enclosing_scope() -> None:
+    """A decorator runs when the ``def`` statement runs, in the module, not in
+    ``handler`` — ``handler`` hasn't finished being defined yet when it evaluates."""
+    calls = {(c.caller, c.name) for c in _symbols("decorated").calls}
+    assert ("sample_app.decorated", "cache") in calls
+    assert ("sample_app.decorated", "get_ttl") in calls
+
+
+def test_default_argument_call_is_attributed_to_the_enclosing_scope() -> None:
+    calls = {(c.caller, c.name) for c in _symbols("decorated").calls}
+    assert ("sample_app.decorated", "compute_default") in calls
+
+
+def test_class_base_call_is_attributed_to_the_enclosing_scope() -> None:
+    calls = {(c.caller, c.name) for c in _symbols("decorated").calls}
+    assert ("sample_app.decorated", "make_base") in calls
+
+
+def test_a_dynamically_computed_base_marks_the_class_dynamic() -> None:
+    """``bases`` is empty either way for ``class Dynamic(make_base())`` and
+    ``class Dynamic:`` — ``dynamic`` is what tells them apart."""
+    symbols = _symbols("decorated")
+    assert symbols.bases["sample_app.decorated.Dynamic"] == ()
+    assert "sample_app.decorated.Dynamic" in symbols.dynamic
+
+
 def test_an_unparseable_file_returns_none(tmp_path: Path) -> None:
     """Reported by the caller, never silently skipped."""
     broken = tmp_path / "broken.py"
