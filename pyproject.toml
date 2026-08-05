@@ -38,6 +38,13 @@ files = ["src", "tests", "scripts"]
 exclude = ["^tests/fixtures/"]
 warn_unreachable = true
 
+# networkx ships no py.typed marker, so strict mode rejects the import outright.
+# Scoped to networkx alone rather than relaxed globally: every other import stays
+# checked, and adding the stub package would mean a new dependency.
+[[tool.mypy.overrides]]
+module = ["networkx.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers --ignore=tests/fixtures"
