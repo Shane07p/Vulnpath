@@ -179,6 +179,9 @@ class ScanResult(BaseModel):
     not prove anything about those packages.
     """
 
+    fix_lookups_failed: int = 0
+    """PyPI lookups that could not be completed, leaving fixes classified UNKNOWN."""
+
     @property
     def is_complete(self) -> bool:
         return self.packages_unqueried == 0
