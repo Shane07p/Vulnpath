@@ -310,10 +310,16 @@ CONCEPTS: list[tuple[str, str]] = [
     ),
     (
         "Fix shape",
-        "How a finding can actually be fixed: DIRECT_BUMP, OVERRIDE, LOCKFILE_REFRESH, "
-        "DIRECT_BUMP edits your manifest, LOCKFILE_REFRESH just relocks, OVERRIDE "
-        "forces a version past a blocking parent, BACKPORT_EXISTS points at a patched "
-        "release on your own major line, NO_FIX means none exists yet.",
+        "The change that would actually close a finding. LOCKFILE_REFRESH just relocks, "
+        "DIRECT_BUMP edits your manifest, OVERRIDE gets past a blocking parent, "
+        "BACKPORT_EXISTS points at a patched release on your own major line, NO_FIX "
+        "means none has been released, and UNKNOWN means the lookup did not complete.",
+    ),
+    (
+        "Fix target",
+        "The lowest fix on your own major line, not the newest release. On urllib3 "
+        "1.26.5 that is 1.26.17 rather than 2.0.6: it closes the advisory without a "
+        "major upgrade and rarely collides with a parent's constraint.",
     ),
     (
         "Reachability",
