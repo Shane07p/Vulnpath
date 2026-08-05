@@ -18,7 +18,16 @@ from rich.table import Table
 from rich.text import Text
 
 from vulnpath.console import console, err_console
-from vulnpath.models import Advisory, Package, ScanResult, Severity, severity_rank
+from vulnpath.models import (
+    Advisory,
+    Finding,
+    Fix,
+    FixShape,
+    Package,
+    ScanResult,
+    Severity,
+    severity_rank,
+)
 
 SEVERITY_STYLE: dict[Severity, str] = {
     Severity.CRITICAL: "bold white on red",
@@ -38,6 +47,15 @@ SEVERITY_LABEL: dict[Severity, str] = {
 """Padded to equal width so the column never reflows. Four characters survives an
 80-column terminal, which a spelled-out word does not."""
 
+FIX_STYLE: dict[FixShape, str] = {
+    FixShape.DIRECT_BUMP: "green",
+    FixShape.LOCKFILE_REFRESH: "green",
+    FixShape.BACKPORT_EXISTS: "cyan",
+    FixShape.OVERRIDE: "yellow",
+    FixShape.NO_FIX: "bold magenta",
+    FixShape.UNKNOWN: "dim",
+}
+
 BAR_GLYPH = "█"
 
 
@@ -53,24 +71,24 @@ def _summary_of(advisory: Advisory) -> str:
 # --- grouping ---------------------------------------------------------------------
 
 
-def group_by_package(result: ScanResult) -> list[tuple[Package, list[Advisory]]]:
+def group_by_package(result: ScanResult) -> list[tuple[Package, list[Finding]]]:
     """One entry per affected package, worst-affected first.
 
     Findings arrive one row per advisory, and a single package can carry a dozen.
     Repeating its name and version on every row buries the thing being decided about,
     which is the package, not the advisory.
     """
-    grouped: dict[str, tuple[Package, list[Advisory]]] = {}
+    grouped: dict[str, tuple[Package, list[Finding]]] = {}
     for finding in result.findings:
         entry = grouped.setdefault(finding.package.name, (finding.package, []))
-        entry[1].append(finding.advisory)
+        entry[1].append(finding)
 
-    for _, advisories in grouped.values():
-        advisories.sort(key=lambda a: (-severity_rank(a.severity), a.display_id))
+    for _, findings in grouped.values():
+        findings.sort(key=lambda f: (-severity_rank(f.advisory.severity), f.advisory.display_id))
 
-    def worst(item: tuple[Package, list[Advisory]]) -> tuple[int, int, str]:
-        package, advisories = item
-        top = max(severity_rank(a.severity) for a in advisories)
+    def worst(item: tuple[Package, list[Finding]]) -> tuple[int, int, str]:
+        package, findings = item
+        top = max(severity_rank(f.advisory.severity) for f in findings)
         return (-top, package.depth, package.name)
 
     return sorted(grouped.values(), key=worst)
@@ -99,7 +117,7 @@ def header(result: ScanResult) -> Panel:
     )
 
 
-def package_heading(package: Package, advisories: list[Advisory]) -> Text:
+def package_heading(package: Package, findings: list[Finding]) -> Text:
     heading = Text("  ")
     heading.append(package.name, style="bold white")
     heading.append(f" {package.version}", style="white")
@@ -108,34 +126,81 @@ def package_heading(package: Package, advisories: list[Advisory]) -> Text:
         "direct" if package.is_direct else f"transitive · depth {package.depth}",
         style="cyan" if package.is_direct else "dim",
     )
-    heading.append(f"  ·  {len(advisories)} advisor{'y' if len(advisories) == 1 else 'ies'}", "dim")
+    heading.append(f"  ·  {len(findings)} advisor{'y' if len(findings) == 1 else 'ies'}", "dim")
     return heading
 
 
-def advisory_rows(advisories: list[Advisory]) -> Table:
-    """Borderless grid. Widths are pinned so the prose column cannot starve the rest."""
+def fix_lines(fix: Fix) -> list[Text]:
+    """The shape, why, and the command — one line each.
+
+    Shapes with no command print their reason too. NO_FIX and UNKNOWN must not read as
+    "nothing to do here": one means no fix has been released, the other means the
+    lookup did not complete, and those call for opposite responses.
+    """
+    style = FIX_STYLE[fix.shape]
+    headline = Text(f"{fix.shape.value.upper()}  ", style=f"bold {style}")
+    headline.append(fix.reason, style="dim")
+    lines = [headline]
+
+    for parent in fix.blocking_parents:
+        detail = Text("  blocked by ", style="dim")
+        detail.append(f"{parent.name} {parent.constraint}", style="yellow")
+        if parent.upgrade_to:
+            detail.append(f" — {parent.name} {parent.upgrade_to} lifts it", style="dim")
+        lines.append(detail)
+
+    if fix.command:
+        lines.extend(Text(f"  $ {line}", style="bold green") for line in fix.command.splitlines())
+    return lines
+
+
+def advisory_row(finding: Finding) -> Table:
+    """One advisory as a single aligned row.
+
+    Widths are pinned so the prose column cannot starve the rest, and so rows line up
+    across findings even though each is rendered separately.
+    """
     table = Table(box=None, show_header=False, expand=True, pad_edge=False, padding=(0, 1))
     table.add_column(width=8, no_wrap=True)
     table.add_column(width=20, no_wrap=True)
     table.add_column(width=12, overflow="fold")
     table.add_column(ratio=1, overflow="fold", min_width=20)
 
-    for advisory in advisories:
-        fixed = advisory.fixed_versions
-        if fixed:
-            fix = Text(fixed[0], style="green")
-            if len(fixed) > 1:
-                fix.append(f" +{len(fixed) - 1}", style="dim")
-        else:
-            fix = Text("no fix", style="bold magenta")
+    advisory = finding.advisory
 
-        table.add_row(
-            _severity_badge(advisory.severity),
-            Text(advisory.display_id, style="bold"),
-            fix,
-            Text(_summary_of(advisory), style="dim"),
-        )
+    # The version this finding should move to, not an arbitrary entry from the
+    # advisory's list. OSV serialises fixed versions in no useful order, so showing
+    # the first one points at 2.0.6 while the recommended fix is 1.26.17.
+    if finding.fix is not None and finding.fix.target_version:
+        fix_cell = Text(finding.fix.target_version, style="green")
+    elif advisory.fixed_versions:
+        fix_cell = Text(advisory.fixed_versions[0], style="green")
+        if len(advisory.fixed_versions) > 1:
+            fix_cell.append(f" +{len(advisory.fixed_versions) - 1}", style="dim")
+    else:
+        fix_cell = Text("no fix", style="bold magenta")
+
+    table.add_row(
+        _severity_badge(advisory.severity),
+        Text(advisory.display_id, style="bold"),
+        fix_cell,
+        Text(_summary_of(advisory), style="dim"),
+    )
     return table
+
+
+def finding_block(finding: Finding) -> RenderableType:
+    """An advisory row, with its fix beneath it at full width.
+
+    The fix deliberately sits outside the table. A shell command folded into a
+    twelve-character column is a command nobody can copy, and copying it is the entire
+    point of printing it.
+    """
+    parts: list[RenderableType] = [advisory_row(finding)]
+    if finding.fix is not None:
+        parts.extend(Padding(line, (0, 0, 0, 9)) for line in fix_lines(finding.fix))
+        parts.append(Text())
+    return Group(*parts)
 
 
 def severity_bars(result: ScanResult) -> Table:
@@ -185,11 +250,11 @@ def render_table(result: ScanResult) -> None:
         return
 
     blocks: list[RenderableType] = [Text()]
-    for package, advisories in group_by_package(result):
-        blocks.append(package_heading(package, advisories))
+    for package, findings in group_by_package(result):
+        blocks.append(package_heading(package, findings))
         # One column of left padding so the severity badges line up under the package
         # name rather than hanging off its left edge.
-        blocks.append(Padding(advisory_rows(advisories), (0, 0, 0, 1)))
+        blocks.extend(Padding(finding_block(f), (0, 0, 0, 1)) for f in findings)
         blocks.append(Text())
 
     console.print(Group(*blocks))
@@ -246,7 +311,9 @@ CONCEPTS: list[tuple[str, str]] = [
     (
         "Fix shape",
         "How a finding can actually be fixed: DIRECT_BUMP, OVERRIDE, LOCKFILE_REFRESH, "
-        "BACKPORT_EXISTS, or NO_FIX. Not built yet.",
+        "DIRECT_BUMP edits your manifest, LOCKFILE_REFRESH just relocks, OVERRIDE "
+        "forces a version past a blocking parent, BACKPORT_EXISTS points at a patched "
+        "release on your own major line, NO_FIX means none exists yet.",
     ),
     (
         "Reachability",

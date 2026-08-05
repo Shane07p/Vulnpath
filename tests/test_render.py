@@ -7,7 +7,16 @@ leaking into machine-readable output.
 import json
 
 from vulnpath.console import console
-from vulnpath.models import Advisory, Finding, Package, ScanResult, Severity
+from vulnpath.models import (
+    Advisory,
+    BlockingParent,
+    Finding,
+    Fix,
+    FixShape,
+    Package,
+    ScanResult,
+    Severity,
+)
 from vulnpath.render import (
     SCAN_OPTIONS,
     group_by_package,
@@ -62,8 +71,8 @@ def test_advisories_within_a_package_are_worst_first() -> None:
         _finding("urllib3", "CVE-low", Severity.LOW),
         _finding("urllib3", "CVE-high", Severity.HIGH),
     )
-    _, advisories = group_by_package(result)[0]
-    assert [a.severity for a in advisories] == [Severity.HIGH, Severity.LOW]
+    _, findings = group_by_package(result)[0]
+    assert [f.advisory.severity for f in findings] == [Severity.HIGH, Severity.LOW]
 
 
 def test_unknown_severity_packages_still_appear() -> None:
@@ -160,3 +169,72 @@ def test_every_declared_scan_option_appears_in_the_guide() -> None:
     }
     documented = {name.split()[0] for name, _, _ in SCAN_OPTIONS}
     assert declared - documented == set()
+
+
+# --- fixes -------------------------------------------------------------------------
+
+
+def _fixed_finding(shape: FixShape, command: str | None, reason: str) -> Finding:
+    finding = _finding("urllib3", "CVE-1", Severity.HIGH)
+    finding.fix = Fix(shape=shape, target_version="1.26.17", command=command, reason=reason)
+    return finding
+
+
+def test_the_fix_command_is_shown() -> None:
+    finding = _fixed_finding(
+        FixShape.DIRECT_BUMP, 'uv add "urllib3>=1.26.17"', "Your pin forbids it."
+    )
+    with console.capture() as capture:
+        render_table(_result(finding))
+    assert 'uv add "urllib3>=1.26.17"' in capture.get()
+
+
+def test_the_shape_is_named() -> None:
+    finding = _fixed_finding(FixShape.LOCKFILE_REFRESH, "uv lock", "Stale lockfile.")
+    with console.capture() as capture:
+        render_table(_result(finding))
+    assert "LOCKFILE_REFRESH" in capture.get()
+
+
+def test_no_fix_says_so_without_offering_a_command() -> None:
+    finding = _fixed_finding(FixShape.NO_FIX, None, "No released version fixes this.")
+    with console.capture() as capture:
+        render_table(_result(finding))
+    output = capture.get()
+    assert "NO_FIX" in output
+    assert "uv add" not in output
+
+
+def test_unknown_fix_reads_as_unproven_not_as_safe() -> None:
+    """A user must not read UNKNOWN as "nothing to do here"."""
+    finding = _fixed_finding(FixShape.UNKNOWN, None, "Could not reach PyPI.")
+    with console.capture() as capture:
+        render_table(_result(finding))
+    output = capture.get()
+    assert "UNKNOWN" in output
+    assert "Could not reach PyPI" in output
+
+
+def test_a_blocking_parent_and_its_upgrade_are_named() -> None:
+    finding = _finding("urllib3", "CVE-1", Severity.HIGH)
+    finding.fix = Fix(
+        shape=FixShape.OVERRIDE,
+        target_version="2.0.6",
+        command='uv add "requests>=2.32.5"',
+        reason="requests blocks it.",
+        blocking_parents=(
+            BlockingParent(name="requests", constraint="<1.27", upgrade_to="2.32.5"),
+        ),
+    )
+    with console.capture() as capture:
+        render_table(_result(finding))
+    output = capture.get()
+    assert "blocked by" in output
+    assert "requests" in output
+
+
+def test_a_finding_without_a_fix_still_renders() -> None:
+    """Classification is optional; the renderer must not require it."""
+    with console.capture() as capture:
+        render_table(_result(_finding("urllib3", "CVE-1", Severity.HIGH)))
+    assert "urllib3" in capture.get()
