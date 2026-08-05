@@ -12,25 +12,33 @@ from collections.abc import Sequence
 from vulnpath.symbols import RawImport
 
 
-def _package_of(module_fqn: str, level: int) -> str | None:
+def _package_of(module_fqn: str, level: int, *, is_package: bool) -> str | None:
     """The package a relative import counts back from.
 
-    ``level=1`` is the module's own package, ``level=2`` its parent, and so on.
-    Counting past the root returns ``None`` — an import that cannot be resolved is
-    better dropped than turned into an FQN that matches nothing.
+    ``level=1`` is the module's own package, ``level=2`` its parent, and so on. A
+    regular module's own package is everything but its last component; an
+    ``__init__.py`` *is* its own package, so nothing gets stripped for it — that
+    matches CPython's ``__package__`` in each case (verified against
+    ``importlib.util.resolve_name``). Counting past the root returns ``None`` — an
+    import that cannot be resolved is better dropped than turned into an FQN that
+    matches nothing.
     """
-    parts = module_fqn.split(".")[:-1]
-    if level - 1 > len(parts):
+    parts = module_fqn.split(".") if is_package else module_fqn.split(".")[:-1]
+    if level > len(parts):
         return None
     remaining = parts[: len(parts) - (level - 1)]
     return ".".join(remaining)
 
 
-def build_import_table(raw: Sequence[RawImport], module_fqn: str) -> dict[str, str]:
+def build_import_table(
+    raw: Sequence[RawImport], module_fqn: str, *, is_package: bool = False
+) -> dict[str, str]:
     """Local name to fully-qualified name for one module.
 
     Later bindings overwrite earlier ones, matching Python: the last import of a name
-    is the one in effect.
+    is the one in effect. ``is_package`` must be set for a module discovered from an
+    ``__init__.py`` — its relative-import boundary is one level deeper than a regular
+    module of the same ``module_fqn`` would have.
     """
     table: dict[str, str] = {}
 
@@ -46,7 +54,7 @@ def build_import_table(raw: Sequence[RawImport], module_fqn: str) -> dict[str, s
             continue
 
         if record.level > 0:
-            package = _package_of(module_fqn, record.level)
+            package = _package_of(module_fqn, record.level, is_package=is_package)
             if package is None:
                 continue
             prefix = f"{package}.{record.module}" if record.module else package

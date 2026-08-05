@@ -57,6 +57,51 @@ def test_a_relative_import_past_the_root_is_dropped() -> None:
     assert "y" not in table
 
 
+def test_relative_import_inside_a_package_init() -> None:
+    """`from . import y` inside app/sub/__init__.py resolves to app.sub.y.
+
+    `module_fqn` for a package's `__init__.py` is the package itself, so unlike a
+    regular module, level=1 must not strip a trailing component that isn't there.
+    """
+    table = build_import_table(
+        [RawImport(module=None, name="y", level=1)], "app.sub", is_package=True
+    )
+    assert table["y"] == "app.sub.y"
+
+
+def test_relative_import_with_a_module_inside_a_package_init() -> None:
+    """`from .mod import thing` inside app/sub/__init__.py resolves to app.sub.mod.thing."""
+    table = build_import_table(
+        [RawImport(module="mod", name="thing", level=1)], "app.sub", is_package=True
+    )
+    assert table["thing"] == "app.sub.mod.thing"
+
+
+def test_relative_import_boundary_for_a_module() -> None:
+    """`app.sub` as a regular module has one package component (`app`): level=1 is the
+    deepest level that resolves, level=2 is the first that must be dropped."""
+    deepest = build_import_table([RawImport(module=None, name="y", level=1)], "app.sub")
+    assert deepest["y"] == "app.y"
+
+    dropped = build_import_table([RawImport(module=None, name="y", level=2)], "app.sub")
+    assert "y" not in dropped
+
+
+def test_relative_import_boundary_for_a_package() -> None:
+    """`app.sub` as a package (its own `__package__`) has two components: level=2 is
+    the deepest level that resolves, level=3 is the first that must be dropped — one
+    level deeper than the identical `module_fqn` allows as a regular module."""
+    deepest = build_import_table(
+        [RawImport(module=None, name="y", level=2)], "app.sub", is_package=True
+    )
+    assert deepest["y"] == "app.y"
+
+    dropped = build_import_table(
+        [RawImport(module=None, name="y", level=3)], "app.sub", is_package=True
+    )
+    assert "y" not in dropped
+
+
 def test_star_imports_are_ignored() -> None:
     """`from x import *` binds unknown names; nothing useful can be recorded."""
     table = build_import_table([RawImport(module="json", name="*")], "app.utils")

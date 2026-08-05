@@ -24,6 +24,9 @@ class SourceModule:
 
     path: Path
     fqn: str
+    is_package: bool = False
+    """Whether this file is an ``__init__.py``. Its own ``fqn`` is its ``__package__``,
+    unlike a regular module's, which relative-import resolution must know."""
 
 
 def is_test_path(path: Path) -> bool:
@@ -115,7 +118,11 @@ def _discover_top_level_tests(project_path: Path, src_root: Path) -> Iterator[So
             path = dirpath / filename
             relative = path.relative_to(project_path)
             if is_test_path(relative):
-                yield SourceModule(path=path, fqn=module_fqn(path, project_path))
+                yield SourceModule(
+                    path=path,
+                    fqn=module_fqn(path, project_path),
+                    is_package=filename == "__init__.py",
+                )
 
 
 def discover_modules(project_path: Path, *, include_tests: bool = False) -> list[SourceModule]:
@@ -131,7 +138,11 @@ def discover_modules(project_path: Path, *, include_tests: bool = False) -> list
         relative = path.relative_to(root)
         if not include_tests and is_test_path(relative):
             continue
-        modules.append(SourceModule(path=path, fqn=module_fqn(path, root)))
+        modules.append(
+            SourceModule(
+                path=path, fqn=module_fqn(path, root), is_package=path.name == "__init__.py"
+            )
+        )
 
     # A src/ layout's root is src itself, which structurally excludes a
     # conventional top-level tests/ directory — it is never on this walk.

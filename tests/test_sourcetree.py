@@ -30,6 +30,17 @@ def test_package_init_maps_to_the_package_itself() -> None:
     assert "sample_app.__init__" not in _fqns(SAMPLE_APP)
 
 
+def test_source_module_is_package_flags_init_files_only() -> None:
+    """`is_package` distinguishes `sample_app/__init__.py` from an ordinary module.
+
+    Relative-import resolution needs this: an `__init__.py`'s `fqn` is its own
+    `__package__`, a regular module's is its parent's.
+    """
+    modules = {m.fqn: m for m in discover_modules(SAMPLE_APP)}
+    assert modules["sample_app"].is_package is True
+    assert modules["sample_app.core"].is_package is False
+
+
 def test_tests_are_excluded_by_default() -> None:
     """A test suite imports nearly everything, so counting it destroys suppression."""
     assert not any("test" in fqn for fqn in _fqns(SAMPLE_APP))
