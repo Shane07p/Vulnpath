@@ -1,5 +1,7 @@
 """Advisory parsing, deduplication, caching and failure handling."""
 
+import os
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -7,6 +9,7 @@ import httpx
 
 from vulnpath.models import Advisory, Package, Severity
 from vulnpath.osv import (
+    QUERY_TTL_SECONDS,
     Cache,
     OsvClient,
     OsvVulnerability,
@@ -235,3 +238,41 @@ def test_merged_records_keep_their_ids_as_aliases() -> None:
     merged = deduplicate(_pair())[0]
     assert "PYSEC-2024-60" in merged.aliases
     assert "GHSA-jjg7-2v4v-x38h" in merged.aliases
+
+
+# --- cache expiry -----------------------------------------------------------------
+
+
+def test_a_stale_query_entry_is_refetched(tmp_path: Path) -> None:
+    """Observed in practice, not hypothetical.
+
+    A scan cached 25 advisories for gitpython 3.1.29; OSV returned 28 minutes later.
+    Without expiry the first answer is served forever and the three newly published
+    advisories are never reported — a false negative that grows worse with age.
+    """
+    cache = Cache(tmp_path)
+    cache.write_query("gitpython@3.1.29", ["GHSA-old"])
+
+    path = tmp_path / "queries" / "gitpython@3.1.29.json"
+    stale = time.time() - (QUERY_TTL_SECONDS + 60)
+    os.utime(path, (stale, stale))
+
+    assert cache.read_query("gitpython@3.1.29") is None
+
+
+def test_a_fresh_query_entry_is_served_from_cache(tmp_path: Path) -> None:
+    cache = Cache(tmp_path)
+    cache.write_query("gitpython@3.1.29", ["GHSA-new"])
+    assert cache.read_query("gitpython@3.1.29") == ["GHSA-new"]
+
+
+def test_advisory_bodies_do_not_expire(tmp_path: Path) -> None:
+    """An advisory's content is immutable once published; only the id list changes."""
+    cache = Cache(tmp_path)
+    cache.write_vuln(GHSA_PAYLOAD["id"], GHSA_PAYLOAD)  # type: ignore[arg-type]
+
+    path = tmp_path / "vulns" / "GHSA-jjg7-2v4v-x38h.json"
+    ancient = time.time() - (QUERY_TTL_SECONDS * 365)
+    os.utime(path, (ancient, ancient))
+
+    assert cache.read_vuln("GHSA-jjg7-2v4v-x38h") is not None

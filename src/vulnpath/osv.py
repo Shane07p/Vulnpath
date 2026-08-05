@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,13 @@ from vulnpath.models import (
 OSV_API = "https://api.osv.dev"
 BATCH_SIZE = 100
 """OSV does not document a hard limit on querybatch; 100 is well inside what it accepts."""
+
+QUERY_TTL_SECONDS = 24 * 60 * 60
+"""How long a package's advisory list stays trusted.
+
+Only the *query* layer expires. Advisory bodies are keyed by id and are effectively
+immutable, so they are cached permanently; which advisories affect a given version
+is not, because new ones are published against releases that already exist."""
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._@-]+")
 
@@ -162,6 +170,23 @@ def extract_affected_ranges(vuln: OsvVulnerability, package_name: str) -> tuple[
     return tuple(ranges)
 
 
+def _union_ranges(group: list[Advisory]) -> tuple[AffectedRange, ...]:
+    """Deduplicate affected ranges across records by their field values.
+
+    Pydantic models are not hashable, so the usual ``dict.fromkeys`` trick does not
+    work here.
+    """
+    seen: set[tuple[str | None, str | None, str | None]] = set()
+    merged: list[AffectedRange] = []
+    for advisory in group:
+        for affected in advisory.affected_ranges:
+            key = (affected.introduced, affected.fixed, affected.last_affected)
+            if key not in seen:
+                seen.add(key)
+                merged.append(affected)
+    return tuple(merged)
+
+
 def _merge(group: list[Advisory]) -> Advisory:
     """Fold records describing the same CVE into one.
 
@@ -192,9 +217,7 @@ def _merge(group: list[Advisory]) -> Advisory:
         fixed_versions=_union([a.fixed_versions for a in group]),
         # Union of ranges, not the primary's. One database can describe an interval
         # the other omits, and a missing interval reads as "not affected".
-        affected_ranges=tuple(
-            dict.fromkeys(r for advisory in group for r in advisory.affected_ranges)
-        ),
+        affected_ranges=_union_ranges(group),
         references=_union([a.references for a in group]),
     )
 
@@ -249,7 +272,25 @@ class Cache:
         self.vulns = root / "vulns"
 
     def read_query(self, key: str) -> list[str] | None:
+        """Cached advisory ids for a package, unless the entry has expired.
+
+        Which advisories affect a given version is not a fixed fact: new ones are
+        published against releases that already exist. Observed in practice — a scan
+        cached 25 advisories for gitpython 3.1.29 and OSV returned 28 minutes later.
+        Without expiry that first answer is served forever and the three new
+        advisories are never reported.
+
+        Expiry uses the file's modification time so the stored format stays a plain
+        list, readable by older builds.
+        """
         path = self.queries / f"{safe_key(key)}.json"
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError:
+            return None
+        if age > QUERY_TTL_SECONDS:
+            return None
+
         data = read_json(path)
         if isinstance(data, list) and all(isinstance(i, str) for i in data):
             return [str(i) for i in data]
