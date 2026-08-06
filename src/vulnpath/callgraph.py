@@ -129,6 +129,32 @@ def _add_node(graph: nx.DiGraph, fqn: str, kind: str, **attrs: object) -> None:
     graph.add_node(fqn, kind=kind, **attrs)
 
 
+EDGE_KIND_PRECEDENCE = ("calls", "inherits", "imports")
+"""Strongest evidence of execution first, for when one pair has several relationships."""
+
+
+def _add_edge(graph: nx.DiGraph, source: str, target: str, kind: str, speculative: bool) -> None:
+    """Record a relationship, merging with whatever is already known about this pair.
+
+    Two rules, both there to stop the label depending on statement order.
+
+    ``speculative`` is sticky-false. One call site resolving exactly is proof the edge
+    is real, and a later fuzzy match to the same target cannot take that back. Without
+    this, the same two calls in the opposite order produced the opposite label.
+
+    ``kind`` keeps the strongest evidence. A module that both imports another and calls
+    into it is doing both, and the call is what matters when tracing execution.
+    """
+    existing = graph.edges.get((source, target))
+    if existing is None:
+        graph.add_edge(source, target, kind=kind, speculative=speculative)
+        return
+
+    existing["speculative"] = bool(existing.get("speculative", True)) and speculative
+    if EDGE_KIND_PRECEDENCE.index(kind) < EDGE_KIND_PRECEDENCE.index(str(existing["kind"])):
+        existing["kind"] = kind
+
+
 def build_call_graph(project_path: Path, *, include_tests: bool = False) -> CallGraph:
     """Build the graph for one project's own source."""
     graph = nx.DiGraph()
@@ -165,7 +191,7 @@ def build_call_graph(project_path: Path, *, include_tests: bool = False) -> Call
             if owner is not None:
                 # Importing a module executes its top level, so this is a real edge.
                 if owner != symbols.fqn:
-                    graph.add_edge(symbols.fqn, owner, kind="imports", speculative=False)
+                    _add_edge(graph, symbols.fqn, owner, "imports", speculative=False)
             elif target not in index.definitions:
                 _add_node(graph, target, "external", dynamic=False)
 
@@ -174,9 +200,7 @@ def build_call_graph(project_path: Path, *, include_tests: bool = False) -> Call
                 targets, speculative = _resolve(base, class_fqn, symbols.fqn, imports, index)
                 for base_fqn in targets:
                     if base_fqn in index.definitions:
-                        graph.add_edge(
-                            class_fqn, base_fqn, kind="inherits", speculative=speculative
-                        )
+                        _add_edge(graph, class_fqn, base_fqn, "inherits", speculative)
 
         for call in symbols.calls:
             targets, speculative = _resolve(call.name, call.caller, symbols.fqn, imports, index)
@@ -184,6 +208,6 @@ def build_call_graph(project_path: Path, *, include_tests: bool = False) -> Call
                 if target not in index.definitions:
                     _add_node(graph, target, "external", dynamic=False)
                 if call.caller in graph:
-                    graph.add_edge(call.caller, target, kind="calls", speculative=speculative)
+                    _add_edge(graph, call.caller, target, "calls", speculative)
 
     return CallGraph(graph=graph, unparsed_files=tuple(unparsed))

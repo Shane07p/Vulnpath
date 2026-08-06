@@ -120,3 +120,58 @@ def test_summary_counts_nodes_and_edges() -> None:
     assert summary["nodes"] > 0
     assert summary["edges"] > 0
     assert summary["external"] >= 2
+
+
+# --- edge merging -------------------------------------------------------------------
+# One pair of symbols can be related several ways. Whatever is recorded must not depend
+# on the order the source happens to mention them in.
+
+
+def _two_call_project(root: Path, body: str) -> Path:
+    package = root / "app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "core.py").write_text("def helper():\n    pass\n", encoding="utf-8")
+    (package / "main.py").write_text(
+        f"from app.core import helper\n\n\ndef go(thing):\n{body}\n", encoding="utf-8"
+    )
+    return package
+
+
+def test_a_resolved_call_stays_resolved_when_a_fuzzy_one_follows(tmp_path: Path) -> None:
+    """`helper()` names its target exactly. A later `thing.helper()` cannot unprove that."""
+    package = _two_call_project(tmp_path, "    helper()\n    thing.helper()")
+    graph = build_call_graph(package)
+    assert graph.graph.edges["app.main.go", "app.core.helper"]["speculative"] is False
+
+
+def test_the_speculative_label_does_not_depend_on_statement_order(tmp_path: Path) -> None:
+    """The regression this exists for.
+
+    The same two calls in opposite orders previously produced opposite labels, because
+    each edge write overwrote the last. A definite call is definite either way.
+    """
+    first = build_call_graph(_two_call_project(tmp_path / "a", "    helper()\n    thing.helper()"))
+    second = build_call_graph(_two_call_project(tmp_path / "b", "    thing.helper()\n    helper()"))
+
+    assert (
+        first.graph.edges["app.main.go", "app.core.helper"]["speculative"]
+        is second.graph.edges["app.main.go", "app.core.helper"]["speculative"]
+    )
+
+
+def test_a_call_edge_outranks_an_inherits_edge_between_the_same_pair(tmp_path: Path) -> None:
+    """A class that both inherits Base and calls it in its body is doing both.
+
+    The call is what matters when tracing execution, so it is the kind that survives.
+    """
+    package = tmp_path / "app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "core.py").write_text(
+        "class Base:\n    pass\n\n\nclass Child(Base):\n    default = Base()\n",
+        encoding="utf-8",
+    )
+
+    graph = build_call_graph(package)
+    assert graph.graph.edges["app.core.Child", "app.core.Base"]["kind"] == "calls"
