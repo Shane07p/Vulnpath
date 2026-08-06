@@ -85,6 +85,7 @@ def _record_module(graph: nx.DiGraph, index: Index, symbols: ModuleSymbols, path
             file=str(path),
             line=definition.line,
             dynamic=definition.fqn in symbols.dynamic,
+            origin="dependency",
         )
 
 

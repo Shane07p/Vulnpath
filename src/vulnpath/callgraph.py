@@ -210,6 +210,7 @@ def build_call_graph(project_path: Path, *, include_tests: bool = False) -> Call
                 file=str(module.path),
                 line=definition.line,
                 dynamic=definition.fqn in symbols.dynamic,
+                origin="project",
             )
 
     # Pass two: resolve call sites, imports and inheritance.
@@ -234,6 +235,15 @@ def build_call_graph(project_path: Path, *, include_tests: bool = False) -> Call
 
         for call in symbols.calls:
             targets, speculative = resolve_name(call.name, call.caller, symbols.fqn, imports, index)
+
+            # An attribute call that resolved to nothing is a blind spot, not an absence.
+            # `thing.danger()` on a receiver of unknown type could land anywhere, and
+            # fan-out only covers definitions already known. A bare name resolving to
+            # nothing is almost always a builtin, so it is not treated the same way —
+            # marking those would make every function that calls len() a blind spot.
+            if not targets and "." in call.name and call.caller in graph:
+                graph.nodes[call.caller]["unresolved"] = True
+
             for target in targets:
                 if target not in index.definitions:
                     add_node(graph, target, "external", dynamic=False)
