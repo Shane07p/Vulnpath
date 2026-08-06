@@ -9,12 +9,16 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+from vulnpath.callgraph import build_call_graph
 from vulnpath.environment import EnvironmentError_, find_site_packages, installed_distributions
+from vulnpath.expand import expand_into_dependencies
 from vulnpath.fixshape import FixContext, classify
+from vulnpath.installed import import_names
 from vulnpath.lockfile import DependencyGraph, load_lockfile
 from vulnpath.models import Advisory, Finding, Package, ScanResult, Severity, severity_rank
 from vulnpath.osv import OsvClient
 from vulnpath.pypi import PyPIClient, constraint_on
+from vulnpath.reachability import ReachabilityIndex
 from vulnpath.versions import parse_specifier, parse_version, satisfies
 
 
@@ -131,12 +135,39 @@ def find_parent_upgrades(
     return upgrades
 
 
+def analyse_reachability(
+    project_path: Path, python: Path | None
+) -> tuple[ReachabilityIndex | None, dict[str, frozenset[str]], dict[str, int]]:
+    """Build the call graph and expand it into the project's installed dependencies.
+
+    Returns nothing usable when there is no environment to read. That is a gap, not a
+    clean result: without dependency source, no verdict about reaching into a package
+    can be trusted, so callers leave every finding unknown rather than assuming safety.
+    """
+    empty_stats = {"graph_nodes": 0, "dependency_modules_parsed": 0, "unparsed": 0}
+    try:
+        site_packages = find_site_packages(project_path, python)
+    except EnvironmentError_:
+        return None, {}, empty_stats
+
+    call_graph = build_call_graph(project_path)
+    expansion = expand_into_dependencies(call_graph, site_packages)
+
+    stats = {
+        "graph_nodes": call_graph.graph.number_of_nodes(),
+        "dependency_modules_parsed": expansion.modules_parsed,
+        "unparsed": len(call_graph.unparsed_files) + len(expansion.unparsed_files),
+    }
+    return ReachabilityIndex(call_graph.graph), import_names(site_packages), stats
+
+
 def run_scan(
     project_path: Path,
     *,
     offline: bool = False,
     severity_floor: Severity | None = None,
     cache_dir: Path | None = None,
+    python: Path | None = None,
 ) -> ScanResult:
     """Resolve the project's packages and match them against OSV advisories."""
     graph = load_lockfile(project_path)
@@ -146,6 +177,7 @@ def run_scan(
     advisories = client.advisories_for(packages)
 
     pypi = PyPIClient(cache_dir, offline=offline)
+    reachability, package_imports, graph_stats = analyse_reachability(project_path, python)
 
     findings: list[Finding] = []
     for package in packages:
@@ -163,7 +195,14 @@ def run_scan(
                 if upgrades:
                     fix = classify(replace(context, parent_upgrades=upgrades))
 
-            findings.append(Finding(package=package, advisory=advisory, fix=fix))
+            finding = Finding(package=package, advisory=advisory, fix=fix)
+            if reachability is not None:
+                result = reachability.analyse(package_imports.get(package.name, frozenset()))
+                finding.verdict = result.verdict.value
+                finding.confidence = result.confidence.value
+                finding.reachability_reason = result.reason
+                finding.path = result.path
+            findings.append(finding)
 
     return ScanResult(
         project_path=str(project_path),
@@ -173,4 +212,8 @@ def run_scan(
         advisories_from_cache=client.cache_hits,
         packages_unqueried=client.packages_unqueried,
         fix_lookups_failed=pypi.lookups_failed,
+        reachability_analysed=reachability is not None,
+        graph_nodes=graph_stats["graph_nodes"],
+        dependency_modules_parsed=graph_stats["dependency_modules_parsed"],
+        unparsed_source_files=graph_stats["unparsed"],
     )

@@ -156,6 +156,23 @@ class Finding(BaseModel):
     fix: Fix | None = None
     """Set by classification, which runs after advisory matching."""
 
+    verdict: str = "unknown"
+    """Whether the project's code reaches this package: reachable, not_reachable, unknown."""
+
+    confidence: str = "low"
+    reachability_reason: str = ""
+    path: tuple[str, ...] = ()
+    """The call path found, as evidence. Empty unless the verdict is reachable."""
+
+    @property
+    def is_suppressible(self) -> bool:
+        """Whether this finding can be safely deprioritised.
+
+        Only a proven negative qualifies. An unknown verdict never does — that is the
+        whole point of keeping the two apart.
+        """
+        return self.verdict == "not_reachable"
+
     @property
     def sort_key(self) -> tuple[int, int, str]:
         """Highest severity first, then shallowest, then stable by id."""
@@ -181,6 +198,14 @@ class ScanResult(BaseModel):
 
     fix_lookups_failed: int = 0
     """PyPI lookups that could not be completed, leaving fixes classified UNKNOWN."""
+
+    reachability_analysed: bool = False
+    """Whether a call graph was built. False means every verdict is an unknown by default."""
+
+    graph_nodes: int = 0
+    dependency_modules_parsed: int = 0
+    unparsed_source_files: int = 0
+    """Files no analysis ran over. Any path through them is unproven, not absent."""
 
     @property
     def is_complete(self) -> bool:

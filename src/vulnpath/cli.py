@@ -105,23 +105,19 @@ def scan(
     if output_format is OutputFormat.SARIF:
         render.error("SARIF output is not implemented yet.")
         raise typer.Exit(2)
-    if fail_on is FailOn.REACHABLE:
-        # Exit rather than warn. A CI gate configured with this flag would otherwise
-        # pass every build while printing a warning nobody reads into stderr, which is
-        # worse than having no gate at all.
-        render.error("--fail-on reachable cannot gate yet; reachability analysis is not built.")
-        raise typer.Exit(2)
-    if only_reachable:
-        render.warn("--only-reachable has no effect yet; reachability analysis is not built.")
-
     floor = Severity(min_severity.value) if min_severity is not None else None
 
     try:
-        with render.working("Resolving lockfile and querying OSV..."):
-            result = run_scan(path, offline=offline, severity_floor=floor)
+        with render.working("Resolving lockfile, querying OSV, tracing call paths..."):
+            result = run_scan(path, offline=offline, severity_floor=floor, python=python)
     except (LockfileError, EnvironmentError_) as exc:
         render.error(str(exc))
         raise typer.Exit(2) from exc
+
+    if only_reachable:
+        # Only a proven negative is dropped. An unknown verdict is kept, because hiding
+        # it would turn the analyser's blind spot into a claim that nothing is there.
+        result.findings = [f for f in result.findings if not f.is_suppressible]
 
     if output_format is OutputFormat.JSON:
         render.render_json(result)
@@ -137,7 +133,15 @@ def scan(
             "This scan does not prove those are clean."
         )
 
+    if not result.reachability_analysed:
+        render.warn(
+            "No environment was found, so no call paths could be traced. Every verdict "
+            "is unknown. Run `uv sync`, or pass --python."
+        )
+
     if fail_on is FailOn.ANY and result.findings:
+        raise typer.Exit(1)
+    if fail_on is FailOn.REACHABLE and any(f.verdict == "reachable" for f in result.findings):
         raise typer.Exit(1)
 
 

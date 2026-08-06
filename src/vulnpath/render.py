@@ -56,6 +56,18 @@ FIX_STYLE: dict[FixShape, str] = {
     FixShape.UNKNOWN: "dim",
 }
 
+VERDICT_STYLE: dict[str, str] = {
+    "reachable": "bold red",
+    "unknown": "bold yellow",
+    "not_reachable": "dim",
+}
+
+VERDICT_LABEL: dict[str, str] = {
+    "reachable": "REACHABLE",
+    "unknown": "UNKNOWN",
+    "not_reachable": "NOT REACHABLE",
+}
+
 BAR_GLYPH = "█"
 
 
@@ -130,6 +142,26 @@ def package_heading(package: Package, findings: list[Finding]) -> Text:
     return heading
 
 
+def verdict_lines(finding: Finding) -> list[Text]:
+    """The verdict, why, and the call path that proves it.
+
+    Placed above the fix because it decides whether the fix is worth doing at all.
+    UNKNOWN is styled distinctly from NOT REACHABLE rather than sharing its dimness:
+    the two look alike in a list and mean opposite things, and a user skimming for what
+    to ignore must not read "we could not tell" as "you are fine".
+    """
+    verdict = finding.verdict
+    style = VERDICT_STYLE.get(verdict, "dim")
+    headline = Text(f"{VERDICT_LABEL.get(verdict, verdict.upper())}  ", style=style)
+    headline.append(f"({finding.confidence} confidence) ", style="dim")
+    headline.append(finding.reachability_reason, style="dim")
+    lines = [headline]
+
+    for depth, hop in enumerate(finding.path):
+        lines.append(Text("  " * depth + ("-> " if depth else "   ") + hop, style="cyan"))
+    return lines
+
+
 def fix_lines(fix: Fix) -> list[Text]:
     """The shape, why, and the command — one line each.
 
@@ -197,6 +229,7 @@ def finding_block(finding: Finding) -> RenderableType:
     point of printing it.
     """
     parts: list[RenderableType] = [advisory_row(finding)]
+    parts.extend(Padding(line, (0, 0, 0, 9)) for line in verdict_lines(finding))
     if finding.fix is not None:
         parts.extend(Padding(line, (0, 0, 0, 9)) for line in fix_lines(finding.fix))
         parts.append(Text())
@@ -229,10 +262,23 @@ def severity_bars(result: ScanResult) -> Table:
 
 
 def totals_line(result: ScanResult) -> Text:
-    affected = len({f.package.name for f in result.findings})
+    """The line someone screenshots.
+
+    "12 findings" is what every scanner prints. "2 reachable" is the reason to install
+    this one, so it leads.
+    """
+    counts = {verdict: 0 for verdict in ("reachable", "unknown", "not_reachable")}
+    for finding in result.findings:
+        counts[finding.verdict] = counts.get(finding.verdict, 0) + 1
+
     line = Text("  ")
     line.append(f"{len(result.findings)} findings", style="bold")
-    line.append(f" in {affected} of {result.packages_scanned} packages", style="dim")
+    line.append("  ·  ", style="dim")
+    line.append(f"{counts['reachable']} reachable", style=VERDICT_STYLE["reachable"])
+    line.append("  ·  ", style="dim")
+    line.append(f"{counts['unknown']} unknown", style=VERDICT_STYLE["unknown"])
+    line.append("  ·  ", style="dim")
+    line.append(f"{counts['not_reachable']} not reachable", style="dim")
     return line
 
 

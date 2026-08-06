@@ -111,17 +111,24 @@ def test_table_renders_findings_without_crashing() -> None:
     assert "pyyaml" in capture.get()
 
 
-def test_totals_count_findings_and_affected_packages() -> None:
-    """Asserted against the Text object, not the rendered output.
+def test_totals_lead_with_the_reachable_count() -> None:
+    """The line someone screenshots.
 
-    ``totals_line`` styles its two halves differently, so the rendered string carries
-    escape codes between them and a substring match on the capture would fail.
+    Every scanner prints a finding count; the reachable count is the reason to install
+    this one, so it appears first and the two negatives follow. Asserted against the
+    Text object because the segments are styled differently, and a substring match on
+    rendered output would trip over the escape codes between them.
     """
-    result = _result(
-        _finding("pyyaml", "CVE-2020-14343", Severity.CRITICAL),
-        _finding("markupsafe", "CVE-2", Severity.UNKNOWN, depth=2),
-    )
-    assert totals_line(result).plain.strip() == "2 findings in 2 of 9 packages"
+    reachable = _finding("pyyaml", "CVE-2020-14343", Severity.CRITICAL)
+    reachable.verdict = "reachable"
+    ignorable = _finding("markupsafe", "CVE-2", Severity.UNKNOWN, depth=2)
+    ignorable.verdict = "not_reachable"
+
+    plain = totals_line(_result(reachable, ignorable)).plain
+    assert "2 findings" in plain
+    assert "1 reachable" in plain
+    assert "1 not reachable" in plain
+    assert plain.index("reachable") < plain.index("not reachable")
 
 
 def test_clean_project_says_so_rather_than_printing_an_empty_table() -> None:
