@@ -2,13 +2,14 @@
 
 Reachability-aware dependency triage for Python.
 
-Every scanner tells you which packages have CVEs. Vulnpath is being built to tell you
+Every scanner tells you which packages have CVEs. Vulnpath tells you
 which ones your code actually reaches, and what shape of fix each one needs.
 
-> **Status: early.** Advisory matching and fix-shape classification work, and both are
-> verified against real packages with known CVEs. Reachability analysis — the reason
-> this project exists — is not built yet. Everything below distinguishes what runs
-> today from what does not.
+> **Status: working, early.** Advisory matching, fix-shape classification and
+> reachability analysis all run today, verified against real packages with known CVEs.
+> Reachability is package-level: it answers whether your code reaches into a package,
+> not yet which function inside it. Everything below distinguishes what runs from what
+> does not.
 
 ## The problem
 
@@ -42,10 +43,50 @@ uv run vulnpath guide             # every command and option, with build status
 - Advisory deduplication: OSV returns one record per source database, so a single CVE
   arrives as both a GHSA and a PYSEC entry.
 - **Fix-shape classification** — see below.
+- **Reachability analysis** — a call graph from your source through installed
+  dependency code, with three verdicts and a printed path. See below.
 - Severity threshold filtering, JSON output, offline mode.
 
-Not built yet: reachability analysis, SARIF output, `--only-reachable`,
-`--fail-on reachable`. `vulnpath guide` marks each one.
+Not built yet: per-symbol reachability, SARIF output, `vulnpath explain`.
+`vulnpath guide` marks each one.
+
+## Does your code actually reach it?
+
+This is the part no free scanner does for Python. Vulnpath parses your source, follows
+calls into the dependency code actually installed in your environment, and reports one
+of three verdicts per finding.
+
+Against a project that imports only `jinja2` and `requests`:
+
+```
+  gitpython 3.1.29  ·  direct  ·  20 advisories
+  CRIT   CVE-2022-24439   3.1.30   GitPython vulnerable to Remote Code Execution
+        NOT REACHABLE  (high confidence) No analysed code imports this package.
+        DIRECT_BUMP  Your constraint ==3.1.29 forbids 3.1.30.
+          $ uv add "gitpython>=3.1.30"
+
+  jinja2 2.10  ·  direct  ·  6 advisories
+  HIGH   CVE-2019-10906   2.10.1   Jinja2 sandbox escape via string formatting
+        REACHABLE  (high confidence) A call path reaches this package.
+           app.render
+          -> jinja2.Template
+        DIRECT_BUMP  Your constraint ==2.10 forbids 2.10.1.
+          $ uv add "jinja2>=2.10.1"
+
+  47 findings  ·  11 reachable  ·  16 unknown  ·  20 not reachable
+```
+
+Two of those suppressed findings are **critical** GitPython RCEs. They are real
+vulnerabilities in an installed package, and nothing in the project imports it.
+
+| Verdict | Means |
+|---|---|
+| `REACHABLE` | A call path exists, and it is printed as evidence |
+| `NOT_REACHABLE` | Claimed only when no analysed code imports the package at all |
+| `UNKNOWN` | A path could not be ruled out |
+
+`--only-reachable` drops proven negatives and **keeps unknowns**. `--fail-on reachable`
+exits non-zero only when a path was found, which is the gate a team will leave on.
 
 ## What kind of fix does it need?
 
@@ -136,10 +177,19 @@ kind of thing an evaluation corpus has to record rather than hide.
 
 ## Design commitments
 
-**`UNKNOWN` never means safe.** When reachability lands there will be three verdicts, not
-two: `REACHABLE`, `NOT_REACHABLE`, and `UNKNOWN`. Dynamic dispatch anywhere on a partial
-path produces `UNKNOWN`. A false "you're safe" is the one failure mode that makes a
-security tool worse than useless, and no amount of noise reduction is worth it.
+**`UNKNOWN` never means safe.** `NOT_REACHABLE` is asserted only when nothing analysed
+imports the package — dynamic dispatch cannot reach a module nobody ever imports, so that
+negative does not rest on having seen through every construct. Everywhere else, if a path
+cannot be ruled out, the verdict is `UNKNOWN`.
+
+Two things force it. A `getattr` or dynamic import can dispatch anywhere. So can an
+attribute call on a receiver of unknown type. A false "you're safe" is the one failure
+mode that makes a security tool worse than useless, and no amount of noise reduction is
+worth it.
+
+A bare unresolved name is deliberately *not* treated that way — those are almost all
+builtins, and counting them would make every function that calls `len()` a blind spot,
+leaving nothing suppressible and the tool useless in the opposite direction.
 
 The same rule already applies to severity: many advisories publish none, and those
 findings are **never** hidden by `--min-severity`. Missing data is not evidence of low

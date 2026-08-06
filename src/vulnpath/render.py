@@ -338,8 +338,8 @@ SCAN_OPTIONS: list[tuple[str, str, str]] = [
     ("--min-severity", READY, "Threshold, not a single level: high means high and critical."),
     ("--offline", READY, "No network. Serves cached advisories only."),
     ("--python", READY, "Point at the scanned project's virtualenv explicitly."),
-    ("--only-reachable", PLANNED, "Hide findings your code provably cannot reach."),
-    ("--fail-on", PARTIAL, "any works now; reachable needs the call graph."),
+    ("--only-reachable", READY, "Hide findings your code provably cannot reach."),
+    ("--fail-on", READY, "Gate CI on any finding, or only on ones your code reaches."),
 ]
 
 CONCEPTS: list[tuple[str, str]] = [
@@ -369,8 +369,9 @@ CONCEPTS: list[tuple[str, str]] = [
     ),
     (
         "Reachability",
-        "Whether a call path exists from your code to the vulnerable symbol. Three "
-        "verdicts: REACHABLE, NOT_REACHABLE, and UNKNOWN. Not built yet.",
+        "Whether a call path exists from your code into the package. REACHABLE prints "
+        "the path as evidence. NOT_REACHABLE is claimed only when nothing analysed "
+        "imports the package. UNKNOWN means a path could not be ruled out.",
     ),
     (
         "UNKNOWN is not safe",
