@@ -59,8 +59,12 @@ class CallGraph:
 
 
 @dataclass
-class _Index:
-    """Everything pass two needs to resolve a name."""
+class Index:
+    """Everything name resolution needs: what exists, and under what names.
+
+    Public because dependency expansion resolves against project and dependency
+    definitions together, using the same rules. Two resolvers would drift.
+    """
 
     definitions: dict[str, str] = field(default_factory=dict)
     """FQN to kind."""
@@ -77,8 +81,8 @@ class _Index:
             self.module_fqns.add(fqn)
 
 
-def _resolve(
-    name: str, caller: str, module_fqn: str, imports: dict[str, str], index: _Index
+def resolve_name(
+    name: str, caller: str, module_fqn: str, imports: dict[str, str], index: Index
 ) -> tuple[set[str], bool]:
     """Targets for one call site, and whether the answer was speculative.
 
@@ -107,7 +111,7 @@ def _resolve(
     return set(), False
 
 
-def _owning_module(fqn: str, module_fqns: set[str]) -> str | None:
+def owning_module(fqn: str, module_fqns: set[str]) -> str | None:
     """The project module a name belongs to, if any.
 
     ``sample_app.core.Processor`` belongs to ``sample_app.core``. Checking only whether
@@ -122,18 +126,44 @@ def _owning_module(fqn: str, module_fqns: set[str]) -> str | None:
     return None
 
 
-def _add_node(graph: nx.DiGraph, fqn: str, kind: str, **attrs: object) -> None:
+def add_node(graph: nx.DiGraph, fqn: str, kind: str, **attrs: object) -> None:
+    """Add or update a node, promoting it out of ``external`` once its source is read.
+
+    A name first seen as a call target is only known to be external. Parsing the module
+    that defines it turns that guess into a fact, and the node has to say so — otherwise
+    a module stays labelled external after being fully analysed, and any count or filter
+    over kinds reports work that was done as work that was skipped.
+
+    Promotion is one-way. Nothing learned later makes a known definition external again.
+    """
     if fqn in graph:
         graph.nodes[fqn].update(attrs)
+        if kind != "external":
+            graph.nodes[fqn]["kind"] = kind
         return
     graph.add_node(fqn, kind=kind, **attrs)
 
 
-EDGE_KIND_PRECEDENCE = ("calls", "inherits", "imports")
-"""Strongest evidence of execution first, for when one pair has several relationships."""
+EDGE_KIND_PRECEDENCE = ("calls", "inherits", "alias", "imports")
+"""Strongest evidence of execution first, for when one pair has several relationships.
+
+``alias`` outranks ``imports`` because a re-export says exactly which symbol a name
+refers to, while an import only says a module's top level ran.
+"""
 
 
-def _add_edge(graph: nx.DiGraph, source: str, target: str, kind: str, speculative: bool) -> None:
+def _kind_rank(kind: str) -> int:
+    """Rank of an edge kind, with unknown kinds ranked last rather than raising.
+
+    A new kind added elsewhere should weaken this merge, not crash a scan mid-way.
+    """
+    try:
+        return EDGE_KIND_PRECEDENCE.index(kind)
+    except ValueError:
+        return len(EDGE_KIND_PRECEDENCE)
+
+
+def add_edge(graph: nx.DiGraph, source: str, target: str, kind: str, speculative: bool) -> None:
     """Record a relationship, merging with whatever is already known about this pair.
 
     Two rules, both there to stop the label depending on statement order.
@@ -151,14 +181,14 @@ def _add_edge(graph: nx.DiGraph, source: str, target: str, kind: str, speculativ
         return
 
     existing["speculative"] = bool(existing.get("speculative", True)) and speculative
-    if EDGE_KIND_PRECEDENCE.index(kind) < EDGE_KIND_PRECEDENCE.index(str(existing["kind"])):
+    if _kind_rank(kind) < _kind_rank(str(existing["kind"])):
         existing["kind"] = kind
 
 
 def build_call_graph(project_path: Path, *, include_tests: bool = False) -> CallGraph:
     """Build the graph for one project's own source."""
     graph = nx.DiGraph()
-    index = _Index()
+    index = Index()
     # The SourceModule is kept alongside its symbols because pass two needs
     # ``is_package`` to resolve relative imports, and ModuleSymbols does not carry it.
     parsed: list[tuple[SourceModule, ModuleSymbols]] = []
@@ -173,7 +203,7 @@ def build_call_graph(project_path: Path, *, include_tests: bool = False) -> Call
         parsed.append((module, symbols))
         for definition in symbols.definitions:
             index.add(definition.fqn, definition.kind)
-            _add_node(
+            add_node(
                 graph,
                 definition.fqn,
                 definition.kind,
@@ -187,27 +217,27 @@ def build_call_graph(project_path: Path, *, include_tests: bool = False) -> Call
         imports = build_import_table(symbols.imports, symbols.fqn, is_package=module.is_package)
 
         for target in imports.values():
-            owner = _owning_module(target, index.module_fqns)
+            owner = owning_module(target, index.module_fqns)
             if owner is not None:
                 # Importing a module executes its top level, so this is a real edge.
                 if owner != symbols.fqn:
-                    _add_edge(graph, symbols.fqn, owner, "imports", speculative=False)
+                    add_edge(graph, symbols.fqn, owner, "imports", speculative=False)
             elif target not in index.definitions:
-                _add_node(graph, target, "external", dynamic=False)
+                add_node(graph, target, "external", dynamic=False)
 
         for class_fqn, bases in symbols.bases.items():
             for base in bases:
-                targets, speculative = _resolve(base, class_fqn, symbols.fqn, imports, index)
+                targets, speculative = resolve_name(base, class_fqn, symbols.fqn, imports, index)
                 for base_fqn in targets:
                     if base_fqn in index.definitions:
-                        _add_edge(graph, class_fqn, base_fqn, "inherits", speculative)
+                        add_edge(graph, class_fqn, base_fqn, "inherits", speculative)
 
         for call in symbols.calls:
-            targets, speculative = _resolve(call.name, call.caller, symbols.fqn, imports, index)
+            targets, speculative = resolve_name(call.name, call.caller, symbols.fqn, imports, index)
             for target in targets:
                 if target not in index.definitions:
-                    _add_node(graph, target, "external", dynamic=False)
+                    add_node(graph, target, "external", dynamic=False)
                 if call.caller in graph:
-                    _add_edge(graph, call.caller, target, "calls", speculative)
+                    add_edge(graph, call.caller, target, "calls", speculative)
 
     return CallGraph(graph=graph, unparsed_files=tuple(unparsed))
