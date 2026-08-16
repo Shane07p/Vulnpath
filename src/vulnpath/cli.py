@@ -89,6 +89,10 @@ def scan(
     only_reachable: Annotated[
         bool, typer.Option("--only-reachable", help="Hide NOT_REACHABLE findings.")
     ] = False,
+    show_all: Annotated[
+        bool,
+        typer.Option("--show-all", help="Expand packages nothing reaches instead of collapsing."),
+    ] = False,
     min_severity: Annotated[
         SeverityFloor | None,
         typer.Option("--min-severity", help="Drop findings below this severity."),
@@ -122,7 +126,7 @@ def scan(
     if output_format is OutputFormat.JSON:
         render.render_json(result)
     else:
-        render.render_table(result)
+        render.render_table(result, show_all=show_all)
         for message in environment_drift(path, python):
             render.warn(message)
 

@@ -20,9 +20,12 @@ from vulnpath.models import (
 from vulnpath.render import (
     SCAN_OPTIONS,
     group_by_package,
+    package_heading,
     render_guide,
     render_json,
     render_table,
+    shorten_path,
+    split_by_relevance,
     totals_line,
 )
 
@@ -245,3 +248,134 @@ def test_a_finding_without_a_fix_still_renders() -> None:
     with console.capture() as capture:
         render_table(_result(_finding("urllib3", "CVE-1", Severity.HIGH)))
     assert "urllib3" in capture.get()
+
+
+# --- ranking and collapsing ---------------------------------------------------------
+# SPEC: reachable+fixable -> reachable+no-fix -> unknown -> not-reachable, severity as
+# tiebreak. Verdict outranks severity, so a critical finding in unreachable code sorts
+# below a medium one on a live path.
+
+
+def _verdict_finding(
+    package: str, severity: Severity, verdict: str, *, fixable: bool = True
+) -> Finding:
+    finding = _finding(package, f"CVE-{package}", severity)
+    finding.verdict = verdict
+    finding.reachability_reason = "because"
+    finding.fix = Fix(
+        shape=FixShape.DIRECT_BUMP if fixable else FixShape.NO_FIX,
+        target_version="2.0.0" if fixable else None,
+        command='uv add "x>=2.0.0"' if fixable else None,
+        reason="reason",
+    )
+    return finding
+
+
+def test_a_reachable_medium_outranks_an_unreachable_critical() -> None:
+    """The ordering that makes the tool worth reading.
+
+    Sorting by severity first puts a critical nothing imports above a medium on a live
+    call path, which buries the finding that matters under the one that does not.
+    """
+    unreachable = _verdict_finding("gitpython", Severity.CRITICAL, "not_reachable")
+    reachable = _verdict_finding("jinja2", Severity.MEDIUM, "reachable")
+
+    ordered = ScanResult(project_path="p", findings=[unreachable, reachable]).sorted_findings
+    assert [f.package.name for f in ordered] == ["jinja2", "gitpython"]
+
+
+def test_unknown_sorts_between_the_two_certainties() -> None:
+    findings = [
+        _verdict_finding("c", Severity.HIGH, "not_reachable"),
+        _verdict_finding("a", Severity.HIGH, "reachable"),
+        _verdict_finding("b", Severity.HIGH, "unknown"),
+    ]
+    ordered = ScanResult(project_path="p", findings=findings).sorted_findings
+    assert [f.verdict for f in ordered] == ["reachable", "unknown", "not_reachable"]
+
+
+def test_a_fixable_finding_outranks_one_with_no_fix_at_equal_verdict() -> None:
+    """Both need attention; only one can be acted on now."""
+    findings = [
+        _verdict_finding("nofix", Severity.HIGH, "reachable", fixable=False),
+        _verdict_finding("fixable", Severity.HIGH, "reachable"),
+    ]
+    ordered = ScanResult(project_path="p", findings=findings).sorted_findings
+    assert [f.package.name for f in ordered] == ["fixable", "nofix"]
+
+
+def test_severity_still_breaks_ties_within_a_verdict() -> None:
+    findings = [
+        _verdict_finding("low", Severity.LOW, "reachable"),
+        _verdict_finding("crit", Severity.CRITICAL, "reachable"),
+    ]
+    ordered = ScanResult(project_path="p", findings=findings).sorted_findings
+    assert [f.package.name for f in ordered] == ["crit", "low"]
+
+
+def test_packages_with_nothing_reachable_are_split_out() -> None:
+    result = _result(
+        _verdict_finding("jinja2", Severity.MEDIUM, "reachable"),
+        _verdict_finding("gitpython", Severity.CRITICAL, "not_reachable"),
+    )
+    relevant, ignorable = split_by_relevance(group_by_package(result))
+
+    assert [p.name for p, _ in relevant] == ["jinja2"]
+    assert [p.name for p, _ in ignorable] == ["gitpython"]
+
+
+def test_a_package_with_one_unknown_among_negatives_is_not_collapsed() -> None:
+    """Collapsing is per package, and an unknown anywhere in it is still worth reading."""
+    unknown = _verdict_finding("urllib3", Severity.HIGH, "unknown")
+    negative = _finding("urllib3", "CVE-other", Severity.LOW)
+    negative.verdict = "not_reachable"
+
+    relevant, ignorable = split_by_relevance(group_by_package(_result(unknown, negative)))
+    assert [p.name for p, _ in relevant] == ["urllib3"]
+    assert ignorable == []
+
+
+def test_collapsed_packages_are_still_named_and_counted() -> None:
+    """Silent suppression is how a scanner loses trust, and the totals must reconcile."""
+    result = _result(
+        _verdict_finding("jinja2", Severity.MEDIUM, "reachable"),
+        _verdict_finding("gitpython", Severity.CRITICAL, "not_reachable"),
+    )
+    with console.capture() as capture:
+        render_table(result)
+
+    output = capture.get()
+    assert "gitpython" in output
+    assert "nothing reaches these" in output
+    assert "--show-all" in output
+
+
+def test_show_all_expands_the_collapsed_packages() -> None:
+    result = _result(_verdict_finding("gitpython", Severity.CRITICAL, "not_reachable"))
+    with console.capture() as capture:
+        render_table(result, show_all=True)
+    assert "nothing reaches these" not in capture.get()
+
+
+def test_the_verdict_appears_once_on_the_package_heading() -> None:
+    """It is a property of the package, not of each advisory in it."""
+    first = _verdict_finding("jinja2", Severity.HIGH, "reachable")
+    second = _finding("jinja2", "CVE-second", Severity.MEDIUM)
+    second.verdict = "reachable"
+    second.reachability_reason = "because"
+
+    heading = package_heading(*group_by_package(_result(first, second))[0])
+    assert "REACHABLE" in heading.plain
+    assert "2 advisories" in heading.plain
+
+
+def test_a_long_project_path_keeps_its_tail() -> None:
+    """The last components identify the project; the leading temp directory does not."""
+    shortened = shorten_path("/home/x/.cache/tmp/deep/nested/dirs/my-project", 30)
+    assert shortened.endswith("my-project")
+    assert len(shortened) == 30
+    assert shortened.startswith("...")
+
+
+def test_a_short_path_is_left_alone() -> None:
+    assert shorten_path("./my-project") == "./my-project"

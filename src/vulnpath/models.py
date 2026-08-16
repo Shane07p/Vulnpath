@@ -147,6 +147,11 @@ class Fix(BaseModel):
         return self.shape not in {FixShape.NO_FIX, FixShape.UNKNOWN}
 
 
+_VERDICT_ORDER: dict[str, int] = {"reachable": 0, "unknown": 1, "not_reachable": 2}
+"""Ranking, not severity. An unknown verdict sits between the two certainties, because
+it needs looking at but has not been shown to matter."""
+
+
 class Finding(BaseModel):
     """A package in this project matched against an advisory affecting it."""
 
@@ -174,9 +179,24 @@ class Finding(BaseModel):
         return self.verdict == "not_reachable"
 
     @property
-    def sort_key(self) -> tuple[int, int, str]:
-        """Highest severity first, then shallowest, then stable by id."""
-        return (-severity_rank(self.advisory.severity), self.package.depth, self.advisory.id)
+    def sort_key(self) -> tuple[int, int, int, int, str]:
+        """Ranked so the top of the list is actionable and the bottom is ignorable.
+
+        Verdict outranks severity deliberately. A critical advisory in code nothing
+        imports is less urgent than a medium one on a live call path, and sorting by
+        severity first buries the finding that matters under the ones that do not —
+        which is the alert fatigue this tool exists to remove.
+
+        Within a reachable finding, one with a known fix comes before one without: both
+        need attention, but only one can be acted on now.
+        """
+        return (
+            _VERDICT_ORDER.get(self.verdict, _VERDICT_ORDER["unknown"]),
+            0 if (self.fix is not None and self.fix.is_actionable) else 1,
+            -severity_rank(self.advisory.severity),
+            self.package.depth,
+            self.advisory.id,
+        )
 
 
 class ScanResult(BaseModel):

@@ -96,23 +96,57 @@ def group_by_package(result: ScanResult) -> list[tuple[Package, list[Finding]]]:
         entry[1].append(finding)
 
     for _, findings in grouped.values():
-        findings.sort(key=lambda f: (-severity_rank(f.advisory.severity), f.advisory.display_id))
+        findings.sort(key=lambda f: f.sort_key)
 
-    def worst(item: tuple[Package, list[Finding]]) -> tuple[int, int, str]:
-        package, findings = item
-        top = max(severity_rank(f.advisory.severity) for f in findings)
-        return (-top, package.depth, package.name)
+    def rank(item: tuple[Package, list[Finding]]) -> tuple[int, int, int, int, str]:
+        """A package ranks by its most urgent finding, since that is why it is listed."""
+        _, findings = item
+        return min(finding.sort_key for finding in findings)
 
-    return sorted(grouped.values(), key=worst)
+    return sorted(grouped.values(), key=rank)
+
+
+def split_by_relevance(
+    groups: list[tuple[Package, list[Finding]]],
+) -> tuple[list[tuple[Package, list[Finding]]], list[tuple[Package, list[Finding]]]]:
+    """Packages worth reading, and packages worth only counting.
+
+    A package where every finding is a proven negative has nothing a reader can act on,
+    and printing all of them in full is the alert fatigue this tool exists to remove. It
+    is still listed and counted — silent suppression is how a scanner loses trust, and
+    the totals have to reconcile against another scanner's.
+    """
+    relevant: list[tuple[Package, list[Finding]]] = []
+    ignorable: list[tuple[Package, list[Finding]]] = []
+    for group in groups:
+        target = ignorable if all(f.is_suppressible for f in group[1]) else relevant
+        target.append(group)
+    return relevant, ignorable
 
 
 # --- pieces -----------------------------------------------------------------------
 
 
+MAX_PATH_WIDTH = 60
+"""Longest project path shown before the head is dropped."""
+
+
+def shorten_path(path: str, limit: int = MAX_PATH_WIDTH) -> str:
+    """Keep the tail of a long path, not the head.
+
+    The last components name the project; the leading ones are whatever temp or home
+    directory it happens to sit under. Wrapping the whole thing across two panel lines
+    spends the header on the least identifying part of it.
+    """
+    if len(path) <= limit:
+        return path
+    return f"...{path[-(limit - 3) :]}"
+
+
 def header(result: ScanResult) -> Panel:
     title = Text("vulnpath", style="bold cyan")
     title.append("  ")
-    title.append(result.project_path, style="white")
+    title.append(shorten_path(result.project_path), style="white")
 
     subtitle = Text(f"{result.packages_scanned} packages resolved", style="dim")
     if result.advisories_from_cache:
@@ -130,6 +164,13 @@ def header(result: ScanResult) -> Panel:
 
 
 def package_heading(package: Package, findings: list[Finding]) -> Text:
+    """Name, version, depth, verdict, count — the whole package in one line.
+
+    The verdict belongs here rather than on each advisory. Reachability is answered per
+    package, so repeating it under every finding printed the same sentence twenty-six
+    times for one GitPython block while telling the reader nothing new.
+    """
+    verdict = findings[0].verdict
     heading = Text("  ")
     heading.append(package.name, style="bold white")
     heading.append(f" {package.version}", style="white")
@@ -138,25 +179,31 @@ def package_heading(package: Package, findings: list[Finding]) -> Text:
         "direct" if package.is_direct else f"transitive · depth {package.depth}",
         style="cyan" if package.is_direct else "dim",
     )
+    heading.append("  ·  ", style="dim")
+    heading.append(
+        VERDICT_LABEL.get(verdict, verdict.upper()), style=VERDICT_STYLE.get(verdict, "dim")
+    )
     heading.append(f"  ·  {len(findings)} advisor{'y' if len(findings) == 1 else 'ies'}", "dim")
     return heading
 
 
+def ignored_line(package: Package, findings: list[Finding]) -> Text:
+    """One line for a package with nothing actionable in it."""
+    line = Text("  ")
+    line.append(f"{package.name} {package.version}", style="dim")
+    count = len(findings)
+    line.append(f"   {count} advisor{'y' if count == 1 else 'ies'}", style="dim")
+    line.append(f"   {findings[0].reachability_reason}", style="dim")
+    return line
+
+
 def verdict_lines(finding: Finding) -> list[Text]:
-    """The verdict, why, and the call path that proves it.
+    """Why the verdict was reached, and the call path that proves it.
 
-    Placed above the fix because it decides whether the fix is worth doing at all.
-    UNKNOWN is styled distinctly from NOT REACHABLE rather than sharing its dimness:
-    the two look alike in a list and mean opposite things, and a user skimming for what
-    to ignore must not read "we could not tell" as "you are fine".
+    The verdict word itself is on the package heading. What stays here is the part that
+    differs between findings: the reasoning, and the path when there is one.
     """
-    verdict = finding.verdict
-    style = VERDICT_STYLE.get(verdict, "dim")
-    headline = Text(f"{VERDICT_LABEL.get(verdict, verdict.upper())}  ", style=style)
-    headline.append(f"({finding.confidence} confidence) ", style="dim")
-    headline.append(finding.reachability_reason, style="dim")
-    lines = [headline]
-
+    lines = [Text(f"{finding.confidence} confidence — {finding.reachability_reason}", "dim")]
     for depth, hop in enumerate(finding.path):
         lines.append(Text("  " * depth + ("-> " if depth else "   ") + hop, style="cyan"))
     return lines
@@ -285,7 +332,7 @@ def totals_line(result: ScanResult) -> Text:
 # --- entry points -----------------------------------------------------------------
 
 
-def render_table(result: ScanResult) -> None:
+def render_table(result: ScanResult, *, show_all: bool = False) -> None:
     console.print()
     console.print(header(result))
 
@@ -295,12 +342,22 @@ def render_table(result: ScanResult) -> None:
         console.print()
         return
 
+    groups = group_by_package(result)
+    relevant, ignorable = (groups, []) if show_all else split_by_relevance(groups)
+
     blocks: list[RenderableType] = [Text()]
-    for package, findings in group_by_package(result):
+    for package, findings in relevant:
         blocks.append(package_heading(package, findings))
         # One column of left padding so the severity badges line up under the package
         # name rather than hanging off its left edge.
         blocks.extend(Padding(finding_block(f), (0, 0, 0, 1)) for f in findings)
+        blocks.append(Text())
+
+    if ignorable:
+        blocks.append(Text("  ── nothing reaches these ──", style="dim"))
+        blocks.extend(ignored_line(package, findings) for package, findings in ignorable)
+        blocks.append(Text())
+        blocks.append(Text("  Pass --show-all to expand them.", style="dim italic"))
         blocks.append(Text())
 
     console.print(Group(*blocks))
@@ -339,6 +396,7 @@ SCAN_OPTIONS: list[tuple[str, str, str]] = [
     ("--offline", READY, "No network. Serves cached advisories only."),
     ("--python", READY, "Point at the scanned project's virtualenv explicitly."),
     ("--only-reachable", READY, "Hide findings your code provably cannot reach."),
+    ("--show-all", READY, "Expand packages nothing reaches, instead of one line each."),
     ("--fail-on", READY, "Gate CI on any finding, or only on ones your code reaches."),
 ]
 
