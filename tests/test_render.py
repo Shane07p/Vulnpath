@@ -94,6 +94,49 @@ def test_json_output_is_parseable() -> None:
     assert payload["findings"][0]["package"]["name"] == "pyyaml"
 
 
+def test_json_omits_what_the_tool_read_but_did_not_conclude() -> None:
+    """The output reports findings, not the evidence that produced them.
+
+    ``details`` is advisory prose carried so the model can read it, ``references`` the
+    link list OSV publishes, and ``fix_commits`` the patches the diff fetcher follows.
+    Together they were 63% of the output — a 25-finding scan weighed 70KB, two thirds of
+    it text any consumer can fetch from OSV with the advisory id it already has.
+    """
+    finding = _finding("pyyaml", "CVE-2020-14343", Severity.CRITICAL)
+    finding.advisory.details = "x" * 5000
+    finding.advisory.references = ("https://example.com/one", "https://example.com/two")
+    finding.advisory.fix_commits = ("https://github.com/o/r/commit/abc1234",)
+
+    with console.capture() as capture:
+        render_json(_result(finding))
+    advisory = json.loads(capture.get())["findings"][0]["advisory"]
+
+    assert "details" not in advisory
+    assert "references" not in advisory
+    assert "fix_commits" not in advisory
+
+    # What a consumer acts on stays.
+    assert advisory["id"] == "CVE-2020-14343"
+    assert advisory["severity"] == "critical"
+    assert "summary" in advisory
+    assert "fixed_versions" in advisory
+
+
+def test_json_keeps_every_finding_however_the_table_collapses() -> None:
+    """Suppression is a display decision. A machine consumer needs the full set."""
+    findings = [
+        _finding("pyyaml", "CVE-1", Severity.CRITICAL),
+        _finding("gitpython", "CVE-2", Severity.HIGH),
+    ]
+    for finding in findings:
+        finding.verdict = "not_reachable"
+
+    with console.capture() as capture:
+        render_json(_result(*findings))
+
+    assert len(json.loads(capture.get())["findings"]) == 2
+
+
 def test_json_survives_characters_the_console_cannot_encode() -> None:
     finding = _finding("pyyaml", "CVE-1", Severity.HIGH)
     finding.advisory.summary = "redirect → leak, naïve parsing"

@@ -378,9 +378,30 @@ def render_table(result: ScanResult, *, show_all: bool = False) -> None:
     console.print()
 
 
+ANALYSIS_INPUTS = {"details", "references", "fix_commits"}
+"""Advisory fields this tool reads but does not report.
+
+``details`` is the advisory prose the model is asked to read, ``references`` the link
+list OSV publishes, and ``fix_commits`` the patch URLs the diff fetcher follows. All
+three are inputs to the analysis rather than conclusions from it, and together they were
+63% of the output — a scan of 25 findings weighed 70KB, two thirds of it text a consumer
+can fetch from OSV with the advisory id it already has.
+"""
+
+
 def render_json(result: ScanResult) -> None:
-    """Machine output. Plain, unstyled, and the only thing on stdout."""
-    console.print(result.model_dump_json(indent=2), soft_wrap=True, markup=False)
+    """Machine output. Plain, unstyled, and the only thing on stdout.
+
+    Every finding survives regardless of what the table collapses: suppressing a finding
+    is a display decision, and a machine consumer needs the full set.
+    """
+    console.print(
+        result.model_dump_json(
+            indent=2, exclude={"findings": {"__all__": {"advisory": ANALYSIS_INPUTS}}}
+        ),
+        soft_wrap=True,
+        markup=False,
+    )
 
 
 # --- guide ------------------------------------------------------------------------
