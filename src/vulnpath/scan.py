@@ -6,12 +6,13 @@ Kept apart from the CLI so the pipeline can be exercised without a parser, and s
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from vulnpath.callgraph import build_call_graph
 from vulnpath.environment import EnvironmentError_, find_site_packages, installed_distributions
 from vulnpath.expand import expand_into_dependencies
+from vulnpath.extract import SymbolExtractor
 from vulnpath.fixshape import FixContext, classify
 from vulnpath.installed import import_names
 from vulnpath.lockfile import DependencyGraph, load_lockfile
@@ -19,6 +20,7 @@ from vulnpath.models import Advisory, Finding, Package, ScanResult, Severity, se
 from vulnpath.osv import OsvClient
 from vulnpath.pypi import PyPIClient, constraint_on
 from vulnpath.reachability import ReachabilityIndex
+from vulnpath.verify import Verification, verify_symbols
 from vulnpath.versions import parse_specifier, parse_version, satisfies
 
 
@@ -135,30 +137,65 @@ def find_parent_upgrades(
     return upgrades
 
 
-def analyse_reachability(
-    project_path: Path, python: Path | None
-) -> tuple[ReachabilityIndex | None, dict[str, frozenset[str]], dict[str, int]]:
+@dataclass(frozen=True)
+class Analysis:
+    """What reachability analysis produced, or an empty one if it could not run.
+
+    ``site_packages`` rides along because symbol verification reads the same installed
+    source the graph was built from. Verifying against a different environment than the
+    one analysed would check a symbol's existence in code that was never traversed.
+    """
+
+    index: ReachabilityIndex | None = None
+    import_names: dict[str, frozenset[str]] = field(default_factory=dict)
+    site_packages: Path | None = None
+    graph_nodes: int = 0
+    dependency_modules_parsed: int = 0
+    unparsed_files: int = 0
+
+
+def analyse_reachability(project_path: Path, python: Path | None) -> Analysis:
     """Build the call graph and expand it into the project's installed dependencies.
 
     Returns nothing usable when there is no environment to read. That is a gap, not a
     clean result: without dependency source, no verdict about reaching into a package
     can be trusted, so callers leave every finding unknown rather than assuming safety.
     """
-    empty_stats = {"graph_nodes": 0, "dependency_modules_parsed": 0, "unparsed": 0}
     try:
         site_packages = find_site_packages(project_path, python)
     except EnvironmentError_:
-        return None, {}, empty_stats
+        return Analysis()
 
     call_graph = build_call_graph(project_path)
     expansion = expand_into_dependencies(call_graph, site_packages)
 
-    stats = {
-        "graph_nodes": call_graph.graph.number_of_nodes(),
-        "dependency_modules_parsed": expansion.modules_parsed,
-        "unparsed": len(call_graph.unparsed_files) + len(expansion.unparsed_files),
-    }
-    return ReachabilityIndex(call_graph.graph), import_names(site_packages), stats
+    return Analysis(
+        index=ReachabilityIndex(call_graph.graph, expansion_complete=expansion.is_complete),
+        import_names=import_names(site_packages),
+        site_packages=site_packages,
+        graph_nodes=call_graph.graph.number_of_nodes(),
+        dependency_modules_parsed=expansion.modules_parsed,
+        unparsed_files=len(call_graph.unparsed_files) + len(expansion.unparsed_files),
+    )
+
+
+def vulnerable_symbols(
+    advisory: Advisory,
+    package: Package,
+    names: frozenset[str],
+    extractor: SymbolExtractor,
+    site_packages: Path,
+) -> Verification:
+    """The symbols this advisory names, kept only where installed source has them.
+
+    Extraction failing and an advisory naming nothing specific both arrive here as no
+    symbols, and both mean the same thing downstream: there is nothing to narrow with, so
+    the package-level verdict stands. Neither is evidence the advisory does not apply.
+    """
+    extracted = extractor.symbols_for(advisory, package.name, names)
+    if not extracted:
+        return Verification(verified=(), dropped=())
+    return verify_symbols(extracted, site_packages)
 
 
 def run_scan(
@@ -177,7 +214,11 @@ def run_scan(
     advisories = client.advisories_for(packages)
 
     pypi = PyPIClient(cache_dir, offline=offline)
-    reachability, package_imports, graph_stats = analyse_reachability(project_path, python)
+    analysis = analyse_reachability(project_path, python)
+    extractor = SymbolExtractor(cache_dir, offline=offline)
+
+    symbols_dropped = 0
+    advisories_narrowed = 0
 
     findings: list[Finding] = []
     for package in packages:
@@ -196,12 +237,30 @@ def run_scan(
                     fix = classify(replace(context, parent_upgrades=upgrades))
 
             finding = Finding(package=package, advisory=advisory, fix=fix)
-            if reachability is not None:
-                result = reachability.analyse(package_imports.get(package.name, frozenset()))
+
+            if analysis.index is not None:
+                names = analysis.import_names.get(package.name, frozenset())
+
+                # Symbol extraction is only worth its cost where a graph exists to match
+                # against. Without one every verdict is unknown regardless, so asking a
+                # model which function is vulnerable would answer a question nothing
+                # downstream can use.
+                symbols: tuple[str, ...] = ()
+                if analysis.site_packages is not None:
+                    verification = vulnerable_symbols(
+                        advisory, package, names, extractor, analysis.site_packages
+                    )
+                    symbols = verification.verified
+                    symbols_dropped += len(verification.dropped)
+                    advisories_narrowed += 1 if symbols else 0
+
+                result = analysis.index.analyse_symbols(names, symbols)
+                finding.vulnerable_symbols = symbols
                 finding.verdict = result.verdict.value
                 finding.confidence = result.confidence.value
                 finding.reachability_reason = result.reason
                 finding.path = result.path
+
             findings.append(finding)
 
     return ScanResult(
@@ -212,8 +271,12 @@ def run_scan(
         advisories_from_cache=client.cache_hits,
         packages_unqueried=client.packages_unqueried,
         fix_lookups_failed=pypi.lookups_failed,
-        reachability_analysed=reachability is not None,
-        graph_nodes=graph_stats["graph_nodes"],
-        dependency_modules_parsed=graph_stats["dependency_modules_parsed"],
-        unparsed_source_files=graph_stats["unparsed"],
+        reachability_analysed=analysis.index is not None,
+        graph_nodes=analysis.graph_nodes,
+        dependency_modules_parsed=analysis.dependency_modules_parsed,
+        unparsed_source_files=analysis.unparsed_files,
+        advisories_narrowed=advisories_narrowed,
+        symbols_dropped=symbols_dropped,
+        symbol_extraction_available=extractor.is_available,
+        extractions_failed=extractor.extractions_failed,
     )

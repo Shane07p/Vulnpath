@@ -9,8 +9,10 @@ from unittest import mock
 
 import pytest
 
+from vulnpath.extract import SymbolExtractor
 from vulnpath.lockfile import load_lockfile
 from vulnpath.models import Advisory, Severity
+from vulnpath.osv import OsvClient
 from vulnpath.pypi import PyPIClient
 from vulnpath.scan import (
     build_fix_context,
@@ -170,3 +172,116 @@ def test_the_severity_floor_is_applied_before_classification(tmp_path: Path) -> 
         SAMPLE_PROJECT, offline=True, severity_floor=Severity.CRITICAL, cache_dir=tmp_path
     )
     assert result.findings == []
+
+
+# --- symbol extraction, wired ---------------------------------------------------------
+# The rules are tested in test_reachability_symbols; what is tested here is that the
+# pipeline actually applies them, and that a model's output never reaches a verdict
+# without passing verification on the way.
+
+
+def _project_using(root: Path, body: str) -> Path:
+    """A scannable project: lockfile, source, and an environment holding one dependency."""
+    (root / "uv.lock").write_text(
+        "version = 1\n\n"
+        '[[package]]\nname = "root"\nversion = "0.1.0"\nsource = { virtual = "." }\n'
+        'dependencies = [{ name = "risky" }]\n\n'
+        '[[package]]\nname = "risky"\nversion = "1.0.0"\n',
+        encoding="utf-8",
+    )
+
+    app = root / "app"
+    app.mkdir()
+    (app / "__init__.py").write_text("", encoding="utf-8")
+    (app / "main.py").write_text(body, encoding="utf-8")
+
+    site_packages = root / ".venv" / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    (site_packages / "risky.py").write_text(
+        "def danger(x):\n    return x\n\n\ndef safe(x):\n    return x\n", encoding="utf-8"
+    )
+    dist_info = site_packages / "risky-1.0.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "RECORD").write_text("risky.py,,\n", encoding="utf-8")
+    return root
+
+
+def _advisory_for_risky() -> dict[str, list[Advisory]]:
+    return {"risky": [Advisory(id="CVE-1", summary="danger() is unsafe", severity=Severity.HIGH)]}
+
+
+def test_a_package_used_but_not_its_vulnerable_function_is_narrowed_away(tmp_path: Path) -> None:
+    """The end-to-end payoff, through the real pipeline.
+
+    The project calls ``risky.safe``; the advisory is about ``risky.danger``. Without
+    symbols this is reachable and stays on the list forever.
+    """
+    project = _project_using(tmp_path, "import risky\n\n\ndef go(x):\n    return risky.safe(x)\n")
+
+    with (
+        mock.patch.object(OsvClient, "advisories_for", return_value=_advisory_for_risky()),
+        mock.patch.object(SymbolExtractor, "symbols_for", return_value=("risky.danger",)),
+    ):
+        result = run_scan(project, cache_dir=tmp_path / "cache")
+
+    (finding,) = result.findings
+    assert finding.verdict == "not_reachable"
+    assert finding.vulnerable_symbols == ("risky.danger",)
+    assert result.advisories_narrowed == 1
+
+
+def test_reaching_the_vulnerable_function_survives_narrowing(tmp_path: Path) -> None:
+    project = _project_using(tmp_path, "import risky\n\n\ndef go(x):\n    return risky.danger(x)\n")
+
+    with (
+        mock.patch.object(OsvClient, "advisories_for", return_value=_advisory_for_risky()),
+        mock.patch.object(SymbolExtractor, "symbols_for", return_value=("risky.danger",)),
+    ):
+        result = run_scan(project, cache_dir=tmp_path / "cache")
+
+    (finding,) = result.findings
+    assert finding.verdict == "reachable"
+    assert finding.path[-1] == "risky.danger"
+
+
+def test_a_hallucinated_symbol_never_reaches_a_verdict(tmp_path: Path) -> None:
+    """The safety property, asserted on the pipeline rather than on the verifier alone.
+
+    ``risky.danger_unsafe`` does not exist. Narrowing to it would find no path and report
+    a real advisory as unreachable. Verification must drop it first, leaving the
+    package-level verdict standing.
+    """
+    project = _project_using(tmp_path, "import risky\n\n\ndef go(x):\n    return risky.danger(x)\n")
+
+    with (
+        mock.patch.object(OsvClient, "advisories_for", return_value=_advisory_for_risky()),
+        mock.patch.object(SymbolExtractor, "symbols_for", return_value=("risky.danger_unsafe",)),
+    ):
+        result = run_scan(project, cache_dir=tmp_path / "cache")
+
+    (finding,) = result.findings
+    assert finding.vulnerable_symbols == ()
+    assert finding.verdict == "reachable"
+    assert result.symbols_dropped == 1
+    assert result.advisories_narrowed == 0
+
+
+def test_a_failed_extraction_leaves_the_package_verdict_alone(tmp_path: Path) -> None:
+    """``None`` from the extractor must not read as "this advisory names nothing"."""
+    project = _project_using(tmp_path, "import risky\n\n\ndef go(x):\n    return risky.safe(x)\n")
+
+    with (
+        mock.patch.object(OsvClient, "advisories_for", return_value=_advisory_for_risky()),
+        mock.patch.object(SymbolExtractor, "symbols_for", return_value=None),
+    ):
+        result = run_scan(project, cache_dir=tmp_path / "cache")
+
+    (finding,) = result.findings
+    assert finding.vulnerable_symbols == ()
+    assert finding.verdict == "reachable"
+
+
+def test_an_offline_scan_reports_that_verdicts_are_package_level(tmp_path: Path) -> None:
+    """--offline must degrade and say so, not fail."""
+    result = run_scan(SAMPLE_PROJECT, offline=True, cache_dir=tmp_path)
+    assert result.symbol_extraction_available is False

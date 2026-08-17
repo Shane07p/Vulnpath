@@ -204,6 +204,15 @@ def verdict_lines(finding: Finding) -> list[Text]:
     differs between findings: the reasoning, and the path when there is one.
     """
     lines = [Text(f"{finding.confidence} confidence — {finding.reachability_reason}", "dim")]
+
+    # Named explicitly rather than left implicit in the reason. A reader deciding whether
+    # to trust a narrowed verdict needs to see which symbol it was narrowed to, since
+    # that is the one thing in the chain a model had a hand in choosing.
+    if finding.vulnerable_symbols:
+        symbols = Text("   vulnerable: ", style="dim")
+        symbols.append(", ".join(finding.vulnerable_symbols), style="yellow")
+        lines.append(symbols)
+
     for depth, hop in enumerate(finding.path):
         lines.append(Text("  " * depth + ("-> " if depth else "   ") + hop, style="cyan"))
     return lines

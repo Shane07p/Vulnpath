@@ -169,6 +169,14 @@ class Finding(BaseModel):
     path: tuple[str, ...] = ()
     """The call path found, as evidence. Empty unless the verdict is reachable."""
 
+    vulnerable_symbols: tuple[str, ...] = ()
+    """The symbols this advisory names, after verification against installed source.
+
+    Empty means the verdict is package-level: either nothing was extracted, or the
+    advisory names nothing specific, or none of what it named survived verification.
+    Empty is never a claim that no symbol is affected.
+    """
+
     @property
     def is_suppressible(self) -> bool:
         """Whether this finding can be safely deprioritised.
@@ -226,6 +234,23 @@ class ScanResult(BaseModel):
     dependency_modules_parsed: int = 0
     unparsed_source_files: int = 0
     """Files no analysis ran over. Any path through them is unproven, not absent."""
+
+    symbol_extraction_available: bool = False
+    """Whether the model could be reached at all. False means every verdict is
+    package-level, which the output says rather than leaving the reader to assume."""
+
+    advisories_narrowed: int = 0
+    """Advisories that carried at least one verified symbol to narrow against."""
+
+    symbols_dropped: int = 0
+    """Extracted symbols that installed source did not contain.
+
+    Hallucinations caught. Reported because a verifier nobody measures is a verifier
+    nobody knows is working — this is the number Phase 6 records as its accuracy figure.
+    """
+
+    extractions_failed: int = 0
+    """Advisories whose symbols could not be extracted, after a retry."""
 
     @property
     def is_complete(self) -> bool:

@@ -39,42 +39,45 @@ def test_no_environment_means_no_analysis_rather_than_a_clean_result(tmp_path: P
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
 
-    index, imports, stats = analyse_reachability(tmp_path, None)
-    assert index is None
-    assert imports == {}
-    assert stats["graph_nodes"] == 0
+    analysis = analyse_reachability(tmp_path, None)
+    assert analysis.index is None
+    assert analysis.import_names == {}
+    assert analysis.site_packages is None
+    assert analysis.graph_nodes == 0
 
 
 def test_an_environment_is_analysed_and_its_import_names_returned(tmp_path: Path) -> None:
     project = _project_with_env(
         tmp_path, "import risky\n\n\ndef go():\n    return risky.danger()\n", "risky"
     )
-    index, imports, stats = analyse_reachability(project, None)
+    analysis = analyse_reachability(project, None)
 
-    assert index is not None
-    assert imports["risky"] == frozenset({"risky"})
-    assert stats["graph_nodes"] > 0
-    assert stats["dependency_modules_parsed"] >= 1
+    assert analysis.index is not None
+    assert analysis.import_names["risky"] == frozenset({"risky"})
+    assert analysis.site_packages is not None
+    assert analysis.graph_nodes > 0
+    assert analysis.dependency_modules_parsed >= 1
 
 
 def test_a_reachable_package_is_reported_as_such(tmp_path: Path) -> None:
     project = _project_with_env(
         tmp_path, "import risky\n\n\ndef go():\n    return risky.danger()\n", "risky"
     )
-    index, imports, _ = analyse_reachability(project, None)
-    assert index is not None
+    analysis = analyse_reachability(project, None)
+    assert analysis.index is not None
 
-    result = index.analyse(imports["risky"])
+    result = analysis.index.analyse(analysis.import_names["risky"])
     assert result.verdict.value == "reachable"
     assert result.path
 
 
 def test_an_unimported_package_is_reported_as_not_reachable(tmp_path: Path) -> None:
     project = _project_with_env(tmp_path, "def go():\n    return 1\n", "risky")
-    index, imports, _ = analyse_reachability(project, None)
-    assert index is not None
+    analysis = analyse_reachability(project, None)
+    assert analysis.index is not None
 
-    assert index.analyse(imports["risky"]).verdict.value == "not_reachable"
+    names = analysis.import_names["risky"]
+    assert analysis.index.analyse(names).verdict.value == "not_reachable"
 
 
 # --- what a verdict means downstream ------------------------------------------------

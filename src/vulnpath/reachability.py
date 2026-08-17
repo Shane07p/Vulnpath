@@ -131,9 +131,18 @@ def _traverse(graph: nx.DiGraph, roots: list[str]) -> _Traversal:
 class ReachabilityIndex:
     """Answers reachability for many packages from one traversal."""
 
-    def __init__(self, graph: nx.DiGraph) -> None:
+    def __init__(self, graph: nx.DiGraph, *, expansion_complete: bool = True) -> None:
         self.graph = graph
         self.roots = _project_roots(graph)
+        self.expansion_complete = expansion_complete
+        """Whether every boundary node was followed into dependency source.
+
+        False means analysis ran out of budget with work outstanding, so a symbol may be
+        absent from the graph for want of parsing rather than for want of a caller. Only
+        symbol-level negatives consult this: a package-level negative rests on nothing
+        importing the package at all, which no amount of further expansion would change.
+        """
+
         self._traversal = _traverse(graph, self.roots)
 
     @property
@@ -212,5 +221,99 @@ class ReachabilityIndex:
             reason=(
                 "The package is imported somewhere, but no call path from your code "
                 "reaches it, and no dynamic dispatch could hide one."
+            ),
+        )
+
+    def analyse_symbols(
+        self, import_names: frozenset[str], symbols: tuple[str, ...]
+    ) -> ReachabilityResult:
+        """Narrow a package-level verdict to the specific symbols an advisory names.
+
+        The narrowing is deliberately asymmetric. Finding a path to a named symbol is
+        positive evidence and is safe to state from any starting verdict. Failing to find
+        one is only safe to state when the analysis had nowhere to hide a path — so a
+        negative requires a package-level verdict that was already confident, every named
+        symbol present in the graph, expansion that finished, and no dynamic dispatch on
+        reachable code.
+
+        ``symbols`` must already be verified against installed source. Narrowing to a
+        symbol that does not exist would find no path and report a real vulnerability as
+        unreachable, which is the failure this tool exists not to produce.
+        """
+        package = self.analyse(import_names)
+
+        # Nothing to narrow with, or nothing to narrow: a package no code reaches cannot
+        # have one of its functions reached either.
+        if not symbols or package.verdict is Verdict.NOT_REACHABLE:
+            return package
+
+        known = [symbol for symbol in symbols if symbol in self.graph]
+        reached = [symbol for symbol in known if symbol in self._traversal.reachable]
+
+        if reached:
+            nearest = min(reached, key=lambda fqn: self._traversal.reachable[fqn])
+            path = self._path_to(nearest)
+            guessed = any(hop in self._traversal.speculative_hops for hop in path)
+            return ReachabilityResult(
+                verdict=Verdict.REACHABLE,
+                confidence=Confidence.MEDIUM if guessed else Confidence.HIGH,
+                reason=(
+                    f"A call path reaches {nearest}, which this advisory names, though "
+                    "at least one hop was resolved by name rather than exactly."
+                    if guessed
+                    else f"A call path reaches {nearest}, which this advisory names."
+                ),
+                path=path,
+            )
+
+        # From here every branch is a negative, and each guard is a way one could be wrong.
+        if package.verdict is not Verdict.REACHABLE:
+            return package
+
+        if len(known) != len(symbols):
+            # Expansion is demand-driven, so a symbol missing from the graph means its
+            # module was never parsed — not that nothing calls it. Those are opposite
+            # conclusions and the string alone cannot tell them apart.
+            return ReachabilityResult(
+                verdict=Verdict.UNKNOWN,
+                confidence=Confidence.LOW,
+                reason=(
+                    "Your code reaches this package, but the symbols this advisory names "
+                    "were never parsed, so whether you reach them is unknown."
+                ),
+            )
+
+        if not self.expansion_complete:
+            return ReachabilityResult(
+                verdict=Verdict.UNKNOWN,
+                confidence=Confidence.LOW,
+                reason=(
+                    "Your code reaches this package, but analysis ran out of budget "
+                    "before it finished, so a path to the named symbols may exist."
+                ),
+            )
+
+        if self._traversal.blind_spot_reachable:
+            # The package is imported, so dynamic dispatch really could land on the
+            # vulnerable symbol. This is stricter than the package-level rule, where a
+            # negative rests on the package never being imported at all — something no
+            # getattr can work around.
+            return ReachabilityResult(
+                verdict=Verdict.UNKNOWN,
+                confidence=Confidence.LOW,
+                reason=(
+                    "Your code reaches this package but not the symbols this advisory "
+                    "names, though reachable code dispatches in ways static analysis "
+                    "cannot follow, so a path may exist."
+                ),
+            )
+
+        named = ", ".join(symbols)
+        return ReachabilityResult(
+            verdict=Verdict.NOT_REACHABLE,
+            confidence=Confidence.HIGH,
+            reason=(
+                f"Your code uses this package, but no call path reaches {named}, "
+                "which is where this advisory is."
             ),
         )

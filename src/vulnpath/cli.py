@@ -142,6 +142,21 @@ def scan(
             "No environment was found, so no call paths could be traced. Every verdict "
             "is unknown. Run `uv sync`, or pass --python."
         )
+    elif not result.symbol_extraction_available:
+        # Said out loud rather than left to inference. Package-level verdicts are weaker
+        # than symbol-level ones in one direction that matters: a package you use will
+        # look reachable even where the vulnerable function is never called.
+        render.warn(
+            "Verdicts are package-level: whether your code reaches into the package, not "
+            "which function. Set GEMINI_API_KEY to narrow them to the symbols each "
+            "advisory names."
+        )
+
+    if result.extractions_failed:
+        render.warn(
+            f"{result.extractions_failed} advisory symbol lookup(s) failed. Those "
+            "findings kept their package-level verdict and will be retried next scan."
+        )
 
     if fail_on is FailOn.ANY and result.findings:
         raise typer.Exit(1)
