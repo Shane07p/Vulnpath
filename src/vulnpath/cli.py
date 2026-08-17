@@ -142,6 +142,12 @@ def scan(
             "No environment was found, so no call paths could be traced. Every verdict "
             "is unknown. Run `uv sync`, or pass --python."
         )
+    elif result.quota_exhausted:
+        render.warn(
+            "The model provider stopped answering for quota, so findings kept "
+            "package-level verdicts. Re-run once it resets — extractions already made "
+            "are cached and will not be repeated."
+        )
     elif not result.symbol_extraction_available:
         # Said out loud rather than left to inference. Package-level verdicts are weaker
         # than symbol-level ones in one direction that matters: a package you use will
@@ -152,13 +158,7 @@ def scan(
             "advisory names."
         )
 
-    if result.quota_exhausted:
-        render.warn(
-            "The model provider stopped answering for quota, so later findings kept "
-            "package-level verdicts. Re-run once it resets — extractions already made "
-            "are cached and will not be repeated."
-        )
-    elif result.extractions_failed:
+    if result.extractions_failed and not result.quota_exhausted:
         render.warn(
             f"{result.extractions_failed} advisory symbol lookup(s) failed. Those "
             "findings kept their package-level verdict and will be retried next scan."

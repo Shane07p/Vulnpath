@@ -285,7 +285,7 @@ def run_scan(
         unparsed_source_files=analysis.unparsed_files,
         advisories_narrowed=advisories_narrowed,
         symbols_dropped=symbols_dropped,
-        symbol_extraction_available=extractor.is_available,
+        symbol_extraction_available=extractor.is_configured,
         extractions_failed=extractor.extractions_failed,
         quota_exhausted=extractor.quota_exhausted,
     )

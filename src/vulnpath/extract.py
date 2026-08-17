@@ -290,9 +290,20 @@ class SymbolExtractor:
         """
 
     @property
+    def is_configured(self) -> bool:
+        """Whether extraction was set up at all — a key exists and the network is allowed.
+
+        Distinct from ``is_available``, which also asks whether the provider is still
+        answering. A run that had a key and ran out of quota is a different thing to
+        report than one that never had a key, and telling the second story for the first
+        sends someone to look for a key they already set.
+        """
+        return bool(self.api_key) and not self.offline
+
+    @property
     def is_available(self) -> bool:
-        """Whether a request could be made at all. A cached answer needs neither."""
-        return bool(self.api_key) and not self.offline and not self.quota_exhausted
+        """Whether a request could be made right now. A cached answer needs neither."""
+        return self.is_configured and not self.quota_exhausted
 
     def symbols_for(
         self, advisory: Advisory, package: str, import_names: frozenset[str], diff: str = ""
