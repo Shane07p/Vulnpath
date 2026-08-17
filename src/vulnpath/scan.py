@@ -18,6 +18,7 @@ from vulnpath.installed import import_names
 from vulnpath.lockfile import DependencyGraph, load_lockfile
 from vulnpath.models import Advisory, Finding, Package, ScanResult, Severity, severity_rank
 from vulnpath.osv import OsvClient
+from vulnpath.patches import PatchFetcher
 from vulnpath.pypi import PyPIClient, constraint_on
 from vulnpath.reachability import ReachabilityIndex
 from vulnpath.verify import Verification, verify_symbols
@@ -184,6 +185,7 @@ def vulnerable_symbols(
     package: Package,
     names: frozenset[str],
     extractor: SymbolExtractor,
+    patches: PatchFetcher,
     site_packages: Path,
 ) -> Verification:
     """The symbols this advisory names, kept only where installed source has them.
@@ -192,7 +194,12 @@ def vulnerable_symbols(
     symbols, and both mean the same thing downstream: there is nothing to narrow with, so
     the package-level verdict stands. Neither is evidence the advisory does not apply.
     """
-    extracted = extractor.symbols_for(advisory, package.name, names)
+    # The diff is fetched only when the model is actually going to be asked. A cached
+    # extraction answers without it, and paying for a patch to feed a request that never
+    # happens is a round trip for nothing.
+    diff = patches.diff_for(advisory.fix_commits) if extractor.is_available else ""
+
+    extracted = extractor.symbols_for(advisory, package.name, names, diff)
     if not extracted:
         return Verification(verified=(), dropped=())
     return verify_symbols(extracted, site_packages)
@@ -216,6 +223,7 @@ def run_scan(
     pypi = PyPIClient(cache_dir, offline=offline)
     analysis = analyse_reachability(project_path, python)
     extractor = SymbolExtractor(cache_dir, offline=offline)
+    patches = PatchFetcher(cache_dir, offline=offline)
 
     symbols_dropped = 0
     advisories_narrowed = 0
@@ -248,7 +256,7 @@ def run_scan(
                 symbols: tuple[str, ...] = ()
                 if analysis.site_packages is not None:
                     verification = vulnerable_symbols(
-                        advisory, package, names, extractor, analysis.site_packages
+                        advisory, package, names, extractor, patches, analysis.site_packages
                     )
                     symbols = verification.verified
                     symbols_dropped += len(verification.dropped)
@@ -279,4 +287,5 @@ def run_scan(
         symbols_dropped=symbols_dropped,
         symbol_extraction_available=extractor.is_available,
         extractions_failed=extractor.extractions_failed,
+        quota_exhausted=extractor.quota_exhausted,
     )

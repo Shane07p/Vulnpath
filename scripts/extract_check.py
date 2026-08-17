@@ -23,6 +23,7 @@ from vulnpath.environment import EnvironmentError_, find_site_packages
 from vulnpath.extract import SymbolExtractor
 from vulnpath.models import normalise
 from vulnpath.osv import OSV_API, OsvVulnerability, to_advisory
+from vulnpath.patches import PatchFetcher
 from vulnpath.verify import verify_symbols
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -75,6 +76,11 @@ def main() -> int:
         help="Comma-separated import names. Defaults to the package name.",
     )
     parser.add_argument(
+        "--no-diff",
+        action="store_true",
+        help="Prose only, ignoring the fix diff. For A/B against the diff-assisted run.",
+    )
+    parser.add_argument(
         "--python",
         default=None,
         help="Environment to verify against. Defaults to this repo's own.",
@@ -103,7 +109,12 @@ def main() -> int:
     print(f"summary    {advisory.summary[:100]}")
     print()
 
-    extracted = extractor.symbols_for(advisory, package, names)
+    diff = ""
+    if not args.no_diff:
+        diff = PatchFetcher().diff_for(advisory.fix_commits)
+        print(f"fix commits {len(advisory.fix_commits)}  diff chars {len(diff)}")
+
+    extracted = extractor.symbols_for(advisory, package, names, diff)
     if extracted is None:
         print("extraction FAILED after one retry — no answer obtained.")
         return 1

@@ -93,6 +93,15 @@ class Advisory(BaseModel):
     affected_ranges: tuple[AffectedRange, ...] = ()
     references: tuple[str, ...] = ()
 
+    fix_commits: tuple[str, ...] = ()
+    """URLs of the commits that fixed this, from the advisory's GIT ranges.
+
+    Taken from ``GIT`` ranges rather than ``FIX`` references. References are what a human
+    filed and are mostly not diffs at all — of six advisories checked, the FIX links were
+    Oracle bulletins, a Red Hat bugzilla and an issue thread, and only one was a commit.
+    Every one of those six carried a repo and a fix SHA in its GIT ranges.
+    """
+
     @property
     def display_id(self) -> str:
         """Prefer a CVE alias — it is what people search for and paste into tickets."""
@@ -251,6 +260,13 @@ class ScanResult(BaseModel):
 
     extractions_failed: int = 0
     """Advisories whose symbols could not be extracted, after a retry."""
+
+    quota_exhausted: bool = False
+    """Whether the model provider stopped answering for quota partway through.
+
+    Findings after that point kept package-level verdicts for a reason that has nothing
+    to do with the code, so the run is not comparable with one that completed. Reported
+    rather than inferred from a low narrowing count."""
 
     @property
     def is_complete(self) -> bool:

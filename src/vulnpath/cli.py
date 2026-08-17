@@ -152,7 +152,13 @@ def scan(
             "advisory names."
         )
 
-    if result.extractions_failed:
+    if result.quota_exhausted:
+        render.warn(
+            "The model provider stopped answering for quota, so later findings kept "
+            "package-level verdicts. Re-run once it resets — extractions already made "
+            "are cached and will not be repeated."
+        )
+    elif result.extractions_failed:
         render.warn(
             f"{result.extractions_failed} advisory symbol lookup(s) failed. Those "
             "findings kept their package-level verdict and will be retried next scan."

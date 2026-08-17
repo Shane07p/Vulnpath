@@ -88,12 +88,17 @@ def test_a_facade_re_export_verifies(tmp_path: Path) -> None:
     ``yaml.load`` is what an advisory says and what a caller writes, but PyYAML's
     ``__init__`` binds it by re-export. Checking definitions alone would drop the most
     common correct answer there is.
+
+    What comes back is the defining location, not the name asked about. The call graph is
+    keyed by where a definition lives, and a project reaching the function through any
+    alias reaches that node — so resolving to it matches a direct call as well as a
+    facade one.
     """
     site_packages = _site_packages(tmp_path)
     _package(site_packages, "yaml", "from yaml.loader import load\n")
     _install(site_packages, "yaml.loader", "def load(stream):\n    return stream\n")
 
-    assert verify_symbols(("yaml.load",), site_packages).verified == ("yaml.load",)
+    assert verify_symbols(("yaml.load",), site_packages).verified == ("yaml.loader.load",)
 
 
 def test_a_star_re_export_verifies(tmp_path: Path) -> None:
@@ -106,7 +111,7 @@ def test_a_star_re_export_verifies(tmp_path: Path) -> None:
     _package(site_packages, "httpx", "from httpx._api import *\n")
     _install(site_packages, "httpx._api", "def get(url):\n    return url\n")
 
-    assert verify_symbols(("httpx.get",), site_packages).verified == ("httpx.get",)
+    assert verify_symbols(("httpx.get",), site_packages).verified == ("httpx._api.get",)
 
 
 def test_a_re_export_of_something_absent_is_still_dropped(tmp_path: Path) -> None:
@@ -210,7 +215,7 @@ def test_a_real_installed_symbol_verifies() -> None:
 
     result = verify_symbols(("httpx.get", "httpx.request"), site_packages)
 
-    assert result.verified == ("httpx.get", "httpx.request")
+    assert result.verified == ("httpx._api.get", "httpx._api.request")
 
 
 def test_a_hallucination_is_caught_against_a_real_environment() -> None:
@@ -221,5 +226,5 @@ def test_a_hallucination_is_caught_against_a_real_environment() -> None:
         ("httpx.get", "httpx.fetch_url_unsafe", "httpx.Client.send_raw"), site_packages
     )
 
-    assert result.verified == ("httpx.get",)
+    assert result.verified == ("httpx._api.get",)
     assert result.dropped == ("httpx.fetch_url_unsafe", "httpx.Client.send_raw")

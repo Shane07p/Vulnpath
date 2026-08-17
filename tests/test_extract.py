@@ -7,6 +7,7 @@ unwrapped defensively enough to survive a response shape nobody planned for.
 """
 
 import json
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -14,8 +15,10 @@ import httpx
 
 from vulnpath.extract import (
     DETAIL_LIMIT,
+    MAX_RETRY_WAIT,
     RESPONSE_SCHEMA,
     SymbolExtractor,
+    api_key_from_dotenv,
     build_prompt,
     is_plausible,
     parse_response,
@@ -148,6 +151,65 @@ def test_a_qualified_name_in_the_right_package_passes() -> None:
     assert is_plausible("yaml.loader.Loader.construct", YAML_NAMES)
 
 
+# --- reading the key off disk --------------------------------------------------------
+
+
+def test_the_key_is_read_from_a_dotenv_file(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text("GEMINI_API_KEY=abc123\n", encoding="utf-8")
+    assert api_key_from_dotenv(env) == "abc123"
+
+
+def test_quotes_and_spacing_are_tolerated(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text('  GEMINI_API_KEY = "abc123"  \n', encoding="utf-8")
+    assert api_key_from_dotenv(env) == "abc123"
+
+
+def test_comments_and_other_variables_are_ignored(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text(
+        "# GEMINI_API_KEY=commented-out\nOTHER=value\nGEMINI_API_KEY=real\n", encoding="utf-8"
+    )
+    assert api_key_from_dotenv(env) == "real"
+
+
+def test_nothing_but_the_one_key_is_ever_read(tmp_path: Path) -> None:
+    """The security property, not a convenience one.
+
+    A scan runs against directories the user did not write. A general loader pointed at
+    one would let a scanned repository set arbitrary environment variables in this
+    process — PATH among them. This reader returns a string and touches nothing.
+    """
+    env = tmp_path / ".env"
+    env.write_text("PATH=/evil\nGEMINI_API_KEY=abc123\n", encoding="utf-8")
+
+    before = os.environ.get("PATH")
+    assert api_key_from_dotenv(env) == "abc123"
+    assert os.environ.get("PATH") == before
+
+
+def test_a_missing_or_unreadable_file_is_not_an_error(tmp_path: Path) -> None:
+    assert api_key_from_dotenv(tmp_path / "nope.env") == ""
+
+
+def test_an_exported_variable_wins_over_the_file(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An export overrides a stale file, the way every other tool behaves."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("GEMINI_API_KEY=from-file\n", encoding="utf-8")
+    monkeypatch.setenv("GEMINI_API_KEY", "from-env")
+
+    assert SymbolExtractor(tmp_path).api_key == "from-env"
+
+
+def test_the_file_is_used_when_nothing_is_exported(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("GEMINI_API_KEY=from-file\n", encoding="utf-8")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    assert SymbolExtractor(tmp_path).api_key == "from-file"
+
+
 # --- availability -------------------------------------------------------------------
 
 
@@ -238,6 +300,112 @@ def test_a_retry_can_succeed(tmp_path: Path) -> None:
         assert extractor.symbols_for(_advisory(), "pyyaml", YAML_NAMES) == ("yaml.load",)
 
     assert extractor.extractions_failed == 0
+
+
+# --- rate limits ---------------------------------------------------------------------
+# A free-tier key allows a couple of dozen requests, and a real scan asks once per
+# advisory. Rate limiting is therefore the expected path on any project worth scanning,
+# not an edge case.
+
+
+def _rate_limited(retry_in: str = "18.1") -> mock.Mock:
+    response = mock.Mock()
+    response.status_code = 429
+    response.headers = {}
+    response.text = f"Quota exceeded. Please retry in {retry_in}s."
+    return response
+
+
+def test_an_immediate_retry_is_not_attempted_after_a_rate_limit(tmp_path: Path) -> None:
+    """Retrying a quota refusal instantly is guaranteed to fail.
+
+    The provider states how long to wait; honouring it is the difference between a
+    second attempt and a second identical rejection.
+    """
+    extractor = _extractor(tmp_path)
+
+    with (
+        mock.patch("httpx.post", return_value=_rate_limited("18.1")) as post,
+        mock.patch("vulnpath.extract.time.sleep") as sleep,
+    ):
+        assert extractor.symbols_for(_advisory(), "pyyaml", YAML_NAMES) is None
+
+    assert post.call_count == 2
+    sleep.assert_called_once_with(18.1)
+
+
+def test_a_retry_after_header_is_preferred_when_sent(tmp_path: Path) -> None:
+    response = _rate_limited()
+    response.headers = {"retry-after": "5"}
+    extractor = _extractor(tmp_path)
+
+    with (
+        mock.patch("httpx.post", return_value=response),
+        mock.patch("vulnpath.extract.time.sleep") as sleep,
+    ):
+        extractor.symbols_for(_advisory(), "pyyaml", YAML_NAMES)
+
+    sleep.assert_called_once_with(5.0)
+
+
+def test_an_absurd_wait_is_capped(tmp_path: Path) -> None:
+    """A provider rationing by the day must not block a scan for the day."""
+    extractor = _extractor(tmp_path)
+
+    with (
+        mock.patch("httpx.post", return_value=_rate_limited("86400")),
+        mock.patch("vulnpath.extract.time.sleep") as sleep,
+    ):
+        extractor.symbols_for(_advisory(), "pyyaml", YAML_NAMES)
+
+    sleep.assert_called_once_with(MAX_RETRY_WAIT)
+
+
+def test_quota_exhaustion_stops_the_scan_asking_again(tmp_path: Path) -> None:
+    """The circuit breaker.
+
+    A scan asks once per advisory. Without this, a quota that ran out on the third
+    advisory is rediscovered by every one after it, at two requests and a sleep each.
+    """
+    extractor = _extractor(tmp_path)
+
+    with (
+        mock.patch("httpx.post", return_value=_rate_limited()) as post,
+        mock.patch("vulnpath.extract.time.sleep"),
+    ):
+        extractor.symbols_for(_advisory(), "pyyaml", YAML_NAMES)
+        assert extractor.quota_exhausted
+        assert not extractor.is_available
+
+        second = Advisory(id="GHSA-second", summary="another")
+        assert extractor.symbols_for(second, "pyyaml", YAML_NAMES) is None
+
+    assert post.call_count == 2
+
+
+def test_a_rate_limit_is_never_cached(tmp_path: Path) -> None:
+    """Quota resets. A cache with no expiry must not outlive it."""
+    extractor = _extractor(tmp_path)
+
+    with (
+        mock.patch("httpx.post", return_value=_rate_limited()),
+        mock.patch("vulnpath.extract.time.sleep"),
+    ):
+        extractor.symbols_for(_advisory(), "pyyaml", YAML_NAMES)
+
+    assert extractor.cache.read("GHSA-abcd-1234-efgh") is None
+
+
+def test_a_retry_after_the_wait_can_succeed(tmp_path: Path) -> None:
+    extractor = _extractor(tmp_path)
+
+    with (
+        mock.patch("httpx.post", side_effect=[_rate_limited(), _reply("yaml.load")]),
+        mock.patch("vulnpath.extract.time.sleep"),
+    ):
+        assert extractor.symbols_for(_advisory(), "pyyaml", YAML_NAMES) == ("yaml.load",)
+
+    assert not extractor.quota_exhausted
 
 
 # --- the request ---------------------------------------------------------------------

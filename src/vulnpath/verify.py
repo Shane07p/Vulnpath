@@ -113,30 +113,56 @@ class _Verifier:
 
     def _reexports(
         self, parsed: ModuleSymbols, is_package: bool, attribute: str, depth: int, seen: set[str]
-    ) -> bool:
-        """Whether this module binds ``attribute`` from elsewhere, and it exists there."""
+    ) -> str | None:
+        """Where this module's binding of ``attribute`` actually leads, if anywhere."""
         head, _, rest = attribute.partition(".")
 
         table = build_import_table(parsed.imports, parsed.fqn, is_package=is_package)
         target = table.get(head)
-        if target is not None and self._exists(
-            f"{target}.{rest}" if rest else target, depth + 1, seen
-        ):
-            return True
+        if target is not None:
+            resolved = self._resolve(f"{target}.{rest}" if rest else target, depth + 1, seen)
+            if resolved is not None:
+                return resolved
 
-        return any(
-            self._exists(f"{source}.{attribute}", depth + 1, seen)
-            for source in self._star_sources(parsed, is_package)
-        )
+        for source in self._star_sources(parsed, is_package):
+            resolved = self._resolve(f"{source}.{attribute}", depth + 1, seen)
+            if resolved is not None:
+                return resolved
+        return None
 
-    def _exists(self, symbol: str, depth: int, seen: set[str]) -> bool:
-        """Whether this exact dotted name resolves to a definition in installed source.
+    def _unique_nested(self, parsed: ModuleSymbols, attribute: str) -> str | None:
+        """A definition nested inside a class, when the module has exactly one by that name.
+
+        Git hunk headers name the nearest enclosing definition and omit the class around
+        it, so a diff showing ``def rebuild_auth(self, ...)`` in ``requests/sessions.py``
+        reads as ``requests.sessions.rebuild_auth`` when the symbol is really
+        ``requests.sessions.SessionRedirectMixin.rebuild_auth``. That path exists nowhere
+        and would be dropped, losing a correct answer to a formatting quirk.
+
+        Resolution is by unique suffix within the one module, never across modules. Two
+        classes each defining ``read`` make the reference genuinely ambiguous, and picking
+        either would be inventing the answer rather than confirming it.
+        """
+        suffix = f".{attribute}"
+        matches = [
+            definition.fqn
+            for definition in parsed.definitions
+            if definition.fqn.endswith(suffix) and definition.kind in {"method", "function"}
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _resolve(self, symbol: str, depth: int, seen: set[str]) -> str | None:
+        """The canonical FQN this name refers to in installed source, or ``None``.
+
+        Returns the resolved name rather than a boolean because the caller matches it
+        against call-graph nodes, and the graph is keyed by where a definition actually
+        lives — not by the path the model happened to write.
 
         ``seen`` guards against mutually importing modules, which are ordinary in real
         packages and would otherwise recurse until the depth limit on every lookup.
         """
         if depth > MAX_REEXPORT_DEPTH or symbol in seen:
-            return False
+            return None
         seen.add(symbol)
 
         for module_fqn, attribute in module_splits(symbol):
@@ -148,21 +174,27 @@ class _Verifier:
             # Definition FQNs are already module-qualified, so a hit is an exact match on
             # the symbol as written.
             if any(definition.fqn == symbol for definition in parsed.definitions):
-                return True
+                return symbol
 
-            if self._reexports(parsed, is_package, attribute, depth, seen):
-                return True
+            resolved = self._reexports(parsed, is_package, attribute, depth, seen)
+            if resolved is not None:
+                return resolved
 
-        return False
+            nested = self._unique_nested(parsed, attribute)
+            if nested is not None:
+                return nested
+
+        return None
 
     def check(self, symbols: tuple[str, ...]) -> Verification:
         verified: list[str] = []
         dropped: list[str] = []
         for symbol in symbols:
-            if self._exists(symbol, depth=0, seen=set()):
-                verified.append(symbol)
-            else:
+            resolved = self._resolve(symbol, depth=0, seen=set())
+            if resolved is None:
                 dropped.append(symbol)
+            elif resolved not in verified:
+                verified.append(resolved)
         return Verification(verified=tuple(verified), dropped=tuple(dropped))
 
 

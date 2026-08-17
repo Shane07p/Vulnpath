@@ -56,6 +56,7 @@ class OsvEvent(_Lenient):
 
 class OsvRange(_Lenient):
     type: str = ""
+    repo: str = ""
     events: list[OsvEvent] = []
 
 
@@ -170,6 +171,28 @@ def extract_affected_ranges(vuln: OsvVulnerability, package_name: str) -> tuple[
     return tuple(ranges)
 
 
+def extract_fix_commits(vuln: OsvVulnerability) -> tuple[str, ...]:
+    """Commit URLs for the fixes, built from ``GIT`` ranges.
+
+    These are the same ranges ``extract_fixed_versions`` deliberately skips. A commit SHA
+    is useless as a version to upgrade to, which is why it is filtered out there — but it
+    is exactly what is wanted to read the patch that fixed the flaw.
+
+    Not filtered to any host here. Whether a URL can actually be fetched as a diff is the
+    fetcher's business, and it is the one place that knows which hosts it supports.
+    """
+    commits: list[str] = []
+    for affected in vuln.affected:
+        for range_ in affected.ranges:
+            if range_.type.upper() != "GIT" or not range_.repo:
+                continue
+            repo = range_.repo.rstrip("/").removesuffix(".git")
+            for event in range_.events:
+                if event.fixed:
+                    commits.append(f"{repo}/commit/{event.fixed}")
+    return tuple(dict.fromkeys(commits))
+
+
 def _union_ranges(group: list[Advisory]) -> tuple[AffectedRange, ...]:
     """Deduplicate affected ranges across records by their field values.
 
@@ -219,6 +242,7 @@ def _merge(group: list[Advisory]) -> Advisory:
         # the other omits, and a missing interval reads as "not affected".
         affected_ranges=_union_ranges(group),
         references=_union([a.references for a in group]),
+        fix_commits=_union([a.fix_commits for a in group]),
     )
 
 
@@ -245,6 +269,7 @@ def to_advisory(vuln: OsvVulnerability, package_name: str) -> Advisory:
         fixed_versions=extract_fixed_versions(vuln, package_name),
         affected_ranges=extract_affected_ranges(vuln, package_name),
         references=tuple(ref.url for ref in vuln.references if ref.url),
+        fix_commits=extract_fix_commits(vuln),
     )
 
 
